@@ -1,0 +1,291 @@
+// Conductor core (PLAN §3.1, §3.3, §3.4): phase state machine + append-only
+// JSONL journal with resume + budget governor. Every transition is journaled;
+// state rebuilds by replay.
+
+import { randomUUID } from 'node:crypto';
+import { mkdir, appendFile, readFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import { Redactor } from '../security/redact.js';
+
+export type Phase =
+  | 'INTAKE'
+  | 'CLARIFY'
+  | 'RESEARCH'
+  | 'PLAN'
+  | 'APPROVE'
+  | 'EXECUTE'
+  | 'VERIFY'
+  | 'INTEGRATE'
+  | 'REPORT'
+  | 'PARKED'
+  | 'DONE';
+
+export interface JournalEvent {
+  ts: number;
+  id: string;
+  phase: Phase;
+  event: string;
+  payload?: unknown;
+}
+
+export interface Usage {
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+
+export interface BudgetLevel {
+  spentUsd: number;
+  ceilingUsd: number;
+  level: 'ok' | 'warn' | 'stop';
+}
+
+export type Subscriber = (ev: JournalEvent) => void;
+
+/** Append-only JSONL journal. Replays into a snapshot on load.
+ * Every line written to disk is redacted (constitution.md: "Redact before a
+ * value reaches a journal entry... not after") — the in-memory copy used by
+ * the rest of this process for the current run keeps the real values; only
+ * the on-disk copy, and therefore anything read back on a future resume, is
+ * scrubbed. A default `new Redactor()` still applies the static secret
+ * patterns even when the caller doesn't register a runtime secret. */
+export class Journal {
+  readonly path: string;
+  private events: JournalEvent[] = [];
+
+  private constructor(
+    path: string,
+    private redactor: Redactor,
+  ) {
+    this.path = path;
+  }
+
+  static async open(path: string, redactor: Redactor = new Redactor()): Promise<Journal> {
+    const j = new Journal(path, redactor);
+    try {
+      const raw = await readFile(path, 'utf8');
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          j.events.push(JSON.parse(line) as JournalEvent);
+        } catch {
+          // A kill -9 mid-append leaves a torn trailing line — skip it and
+          // keep resuming from everything that did flush, don't crash resume
+          // on exactly the failure mode journaling exists to survive.
+          console.error(`m1m1r: skipping malformed journal line in ${path}`);
+        }
+      }
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    }
+    return j;
+  }
+
+  get eventsAll(): readonly JournalEvent[] {
+    return this.events;
+  }
+
+  async append(phase: Phase, event: string, payload?: unknown): Promise<JournalEvent> {
+    const ev: JournalEvent = { ts: Date.now(), id: randomUUID(), phase, event, payload };
+    await mkdir(dirname(this.path), { recursive: true });
+    await appendFile(this.path, this.redactor.scrub(JSON.stringify(ev)) + '\n');
+    this.events.push(ev);
+    return ev;
+  }
+}
+
+export interface Config {
+  budgetSoftWarnUsd: number;
+  budgetHardStopUsd: number;
+  prices: Record<string, { inPerM: number; outPerM: number }>;
+}
+
+const DEFAULT_CONFIG: Config = {
+  // Plan §8/Q2 defaults: soft-warn $10, hard-stop $25 per engagement.
+  budgetSoftWarnUsd: 10,
+  budgetHardStopUsd: 25,
+  prices: {},
+};
+
+export async function loadConfig(path?: string): Promise<Config> {
+  let cfg = { ...DEFAULT_CONFIG };
+  if (!path) return cfg;
+  try {
+    cfg = { ...cfg, ...JSON.parse(await readFile(path, 'utf8')) };
+  } catch {
+    /* missing config -> defaults */
+  }
+  return cfg;
+}
+
+/** Budget governor (PLAN §3.1). Warn at threshold, hard stop parks the engagement.
+ * Pure math only — journaling/emitting BUDGET_UPDATE is Conductor.charge()'s job,
+ * so every state change is emitted, not just the ones a phase transition happens
+ * to follow (PLAN §3.7.4 "numbers never render before their first real event"). */
+export class BudgetGovernor {
+  spentUsd = 0;
+  level: 'ok' | 'warn' | 'stop' = 'ok';
+  constructor(private cfg: Config) {}
+
+  charge(usage: Usage | undefined, model: string | undefined): BudgetLevel {
+    if (!usage || !model) return { ...this.snapshot() };
+    const price = this.cfg.prices[model];
+    if (!price) return { ...this.snapshot() }; // unknown price -> no invented dollars
+    const usd =
+      (usage.prompt_tokens * price.inPerM + usage.completion_tokens * price.outPerM) / 1e6;
+    this.spentUsd += usd;
+    const ratio = this.spentUsd / this.cfg.budgetHardStopUsd;
+    const next: 'ok' | 'warn' | 'stop' =
+      ratio >= 1 ? 'stop' : this.spentUsd >= this.cfg.budgetSoftWarnUsd ? 'warn' : 'ok';
+    if (next !== this.level) this.level = next;
+    return { ...this.snapshot() };
+  }
+
+  snapshot(): BudgetLevel {
+    return {
+      spentUsd: round6(this.spentUsd),
+      ceilingUsd: this.cfg.budgetHardStopUsd,
+      level: this.level,
+    };
+  }
+
+  shouldPark(): boolean {
+    return this.level === 'stop';
+  }
+}
+
+function round6(n: number): number {
+  return Math.round(n * 1e6) / 1e6;
+}
+
+export type ConductorState = {
+  id: string;
+  phase: Phase;
+  requirement?: string;
+  planSteps?: Array<{ desc: string; file?: string; content?: string; shell?: string }>;
+  receipts?: Array<{ cmd: string; exit: number | null; outputRef: string }>;
+  report?: string;
+  budget: BudgetLevel;
+  usageTotals: { promptTokens: number; completionTokens: number };
+  blockingQuestion?: unknown;
+};
+
+/** Phase state machine over an append-only journal. */
+export class Conductor {
+  state: ConductorState;
+  readonly journal: Journal;
+  private subs = new Set<Subscriber>();
+  private governor: BudgetGovernor;
+
+  private constructor(
+    public readonly dir: string,
+    journal: Journal,
+    state: ConductorState,
+    cfg: Config,
+  ) {
+    this.journal = journal;
+    this.state = state;
+    this.governor = new BudgetGovernor(cfg);
+    this.state.budget = this.governor.snapshot();
+  }
+
+  /** Open existing engagement dir or create fresh one. Pass the process's own
+   * Redactor (with runtime secrets like the API key registered) so journaled
+   * events get exact-match scrubbing too, not just the static patterns. */
+  static async open(dir: string, cfg?: Config, redactor?: Redactor): Promise<Conductor> {
+    const journal = await Journal.open(`${dir}/journal.jsonl`, redactor);
+    const config = cfg ?? (await loadConfig());
+    const c = new Conductor(dir, journal, replay(journal), config);
+    // Replay past usage through the governor so budget survives resume.
+    for (const ev of journal.eventsAll) {
+      if (ev.event === 'USAGE') {
+        const p = ev.payload as { usage: Usage; model?: string };
+        c.governor.charge(p.usage, p.model);
+      }
+    }
+    c.state.budget = c.governor.snapshot();
+    return c;
+  }
+
+  subscribe(fn: Subscriber): () => void {
+    this.subs.add(fn);
+    return () => this.subs.delete(fn);
+  }
+
+  private emit(ev: JournalEvent): void {
+    for (const fn of this.subs) fn(ev);
+  }
+
+  async transition(phase: Phase, event: string, payload?: unknown): Promise<void> {
+    if (this.state.phase === 'PARKED' || this.state.phase === 'DONE') return;
+    this.state.phase = phase;
+    this.emit(await this.journal.append(phase, event, payload));
+  }
+
+  // Awaited end to end, not fire-and-forget: a `kill -9` landing between
+  // charge() returning and an un-awaited fs write finishing would lose that
+  // USAGE event, so resume's budget total would silently undercount spend.
+  async charge(usage: Usage, model?: string): Promise<BudgetLevel> {
+    this.emit(await this.journal.append(this.state.phase, 'USAGE', { usage, model }));
+    const lvl = this.governor.charge(usage, model);
+    this.state.usageTotals.promptTokens += usage.prompt_tokens;
+    this.state.usageTotals.completionTokens += usage.completion_tokens;
+    this.state.budget = lvl;
+    this.emit(await this.journal.append(this.state.phase, 'BUDGET_UPDATE', lvl));
+    if (this.governor.shouldPark()) await this.park('budget hard stop');
+    return lvl;
+  }
+
+  async park(reason: string): Promise<void> {
+    await this.transition('PARKED', 'PARK', { reason });
+  }
+
+  async complete(): Promise<void> {
+    await this.transition('DONE', 'COMPLETE');
+  }
+}
+
+function replay(j: Journal): ConductorState {
+  const s: ConductorState = {
+    id: '',
+    phase: 'INTAKE',
+    budget: { spentUsd: 0, ceilingUsd: 25, level: 'ok' },
+    usageTotals: { promptTokens: 0, completionTokens: 0 },
+  };
+  for (const ev of j.eventsAll) {
+    if (!s.id) s.id = ev.id.slice(0, 8); // stable display id from first event
+    // Every event's own `.phase` field already reflects the phase active
+    // when it was journaled (transition() and every direct journal.append
+    // call set it), so this alone tracks state correctly across ALL event
+    // names — a switch keyed on event name here previously missed 'SKIPPED'
+    // and 'AUTO_APPROVED', desyncing state.phase from what actually happened
+    // and making resume re-run the intake block on every restart.
+    s.phase = ev.phase;
+    switch (ev.event) {
+      case 'START':
+        s.requirement = (ev.payload as { requirement: string }).requirement;
+        break;
+      case 'PLAN':
+        s.planSteps = ev.payload as ConductorState['planSteps'];
+        break;
+      case 'RECEIPTS':
+        s.receipts = ev.payload as ConductorState['receipts'];
+        break;
+      case 'REPORT':
+        s.report = (ev.payload as { text: string }).text;
+        break;
+      case 'QUESTION_RAISED':
+        s.blockingQuestion = ev.payload;
+        break;
+      case 'QUESTION_ANSWERED':
+        s.blockingQuestion = undefined;
+        break;
+      default:
+        break;
+    }
+  }
+  return s;
+}
+
+export function newEngagementId(): string {
+  return new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + randomUUID().slice(0, 8);
+}

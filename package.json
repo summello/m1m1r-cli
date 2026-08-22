@@ -1,0 +1,32 @@
+{
+  "name": "m1m1r",
+  "version": "0.1.0",
+  "description": "Autonomous engineering team harness — terminal-native orchestrator",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "m1m1r": "./dist/bin/m1m1r.js"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc && mkdir -p dist/agents/_shared && cp src/agents/_shared/constitution.md dist/agents/_shared/",
+    "dev": "tsx src/bin/m1m1r.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:smoke": "SMOKE=1 vitest run src/__tests__/smoke.live.test.ts"
+  },
+  "dependencies": {
+    "ink": "^6.4.0",
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
