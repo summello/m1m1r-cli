@@ -195,4 +195,27 @@ describe('resume-aware runEngagement', () => {
     expect(seen).toContain('USAGE');
     expect(seen).toContain('BUDGET_UPDATE');
   });
+
+  it('recordUsage() never touches budget, even for a model with a price-table entry — structural guarantee, not an absent-price convention', async () => {
+    // Deliberately give MODEL a price entry, unlike CFG — this is exactly
+    // the configuration an independent review flagged as capable of
+    // silently double-billing an Anthropic turn if charge() (not
+    // recordUsage()) were used for token/display bookkeeping alongside
+    // chargeUsd()'s exact dollar charge.
+    const pricedCfg: Config = { ...CFG, prices: { [MODEL]: { inPerM: 1, outPerM: 1 } } };
+    const conductor = await Conductor.open(dir, pricedCfg);
+
+    await conductor.recordUsage({ prompt_tokens: 1_000_000, completion_tokens: 1_000_000 }, MODEL);
+    expect(conductor.state.budget.spentUsd).toBe(0);
+    expect(conductor.state.usageTotals.promptTokens).toBe(1_000_000); // still recorded for display
+
+    await conductor.chargeUsd(0.5); // the only thing that should move budget
+    expect(conductor.state.budget.spentUsd).toBe(0.5);
+
+    // And it stays that way across resume — recordUsage's event carries
+    // budgetExempt, so replay doesn't retroactively run it through the
+    // (now-priced) governor either.
+    const reopened = await Conductor.open(dir, pricedCfg);
+    expect(reopened.state.budget.spentUsd).toBe(0.5);
+  });
 });

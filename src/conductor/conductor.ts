@@ -93,10 +93,18 @@ export class Journal {
   }
 }
 
+export interface TierBinding {
+  provider: string;
+  model: string;
+}
+
 export interface Config {
   budgetSoftWarnUsd: number;
   budgetHardStopUsd: number;
   prices: Record<string, { inPerM: number; outPerM: number }>;
+  /** Tier alias (opus/sonnet/haiku, PLAN §4.1) -> provider/model. Read/written
+   * by `m1m1r model ls|use` (§4.1's non-interactive twin to `/model`). */
+  tiers?: Record<string, TierBinding>;
 }
 
 const DEFAULT_CONFIG: Config = {
@@ -132,6 +140,17 @@ export class BudgetGovernor {
     if (!price) return { ...this.snapshot() }; // unknown price -> no invented dollars
     const usd =
       (usage.prompt_tokens * price.inPerM + usage.completion_tokens * price.outPerM) / 1e6;
+    return this.applyUsd(usd);
+  }
+
+  /** Charge a provider-billed dollar amount directly (e.g. the Claude Agent
+   * SDK's `total_cost_usd`) — real cost, not a token×price estimate, so no
+   * price-table entry is needed for that model at all. */
+  chargeExact(usd: number): BudgetLevel {
+    return this.applyUsd(usd);
+  }
+
+  private applyUsd(usd: number): BudgetLevel {
     this.spentUsd += usd;
     const ratio = this.spentUsd / this.cfg.budgetHardStopUsd;
     const next: 'ok' | 'warn' | 'stop' =
@@ -157,6 +176,20 @@ function round6(n: number): number {
   return Math.round(n * 1e6) / 1e6;
 }
 
+export interface PlannedTeamNode {
+  id: string;
+  scope: string[];
+  acceptanceCriteria: string;
+  dependsOn: string[];
+  input: string;
+}
+
+export interface TeamNodeResult {
+  id: string;
+  ok: boolean;
+  text: string;
+}
+
 export type ConductorState = {
   id: string;
   phase: Phase;
@@ -167,6 +200,11 @@ export type ConductorState = {
   budget: BudgetLevel;
   usageTotals: { promptTokens: number; completionTokens: number };
   blockingQuestion?: unknown;
+  // Team/DAG engagement state (PLAN §6 Phase 1) — kept separate from
+  // planSteps/receipts above (Phase 0's single-agent shape) rather than
+  // reusing those fields for a structurally different flow.
+  teamNodes?: PlannedTeamNode[];
+  teamResults?: TeamNodeResult[];
 };
 
 /** Phase state machine over an append-only journal. */
@@ -198,8 +236,10 @@ export class Conductor {
     // Replay past usage through the governor so budget survives resume.
     for (const ev of journal.eventsAll) {
       if (ev.event === 'USAGE') {
-        const p = ev.payload as { usage: Usage; model?: string };
-        c.governor.charge(p.usage, p.model);
+        const p = ev.payload as { usage: Usage; model?: string; budgetExempt?: boolean };
+        if (!p.budgetExempt) c.governor.charge(p.usage, p.model);
+      } else if (ev.event === 'USAGE_USD') {
+        c.governor.chargeExact((ev.payload as { usd: number }).usd);
       }
     }
     c.state.budget = c.governor.snapshot();
@@ -230,6 +270,32 @@ export class Conductor {
     this.state.usageTotals.promptTokens += usage.prompt_tokens;
     this.state.usageTotals.completionTokens += usage.completion_tokens;
     this.state.budget = lvl;
+    this.emit(await this.journal.append(this.state.phase, 'BUDGET_UPDATE', lvl));
+    if (this.governor.shouldPark()) await this.park('budget hard stop');
+    return lvl;
+  }
+
+  /** Records token counts for display/ctx% only — structurally never touches
+   * budget, on write or on replay (the `budgetExempt` flag on the journaled
+   * event, not an assumption about whether `cfg.prices` happens to lack an
+   * entry for `model`). Use this alongside chargeUsd() for a provider that
+   * bills an exact dollar amount per call (e.g. Anthropic's
+   * `total_cost_usd`) — calling charge() for the same turn would double-bill
+   * the moment someone populates a price-table entry for that model. */
+  async recordUsage(usage: Usage, model?: string): Promise<void> {
+    this.emit(await this.journal.append(this.state.phase, 'USAGE', { usage, model, budgetExempt: true }));
+    this.state.usageTotals.promptTokens += usage.prompt_tokens;
+    this.state.usageTotals.completionTokens += usage.completion_tokens;
+  }
+
+  /** Charge a provider-billed dollar amount directly, bypassing the
+   * token×price estimate (e.g. Claude Agent SDK's `total_cost_usd`). Pair
+   * with recordUsage() (not charge()) for token/display bookkeeping on the
+   * same call — see recordUsage()'s doc for why. */
+  async chargeUsd(usd: number): Promise<BudgetLevel> {
+    const lvl = this.governor.chargeExact(usd);
+    this.state.budget = lvl;
+    this.emit(await this.journal.append(this.state.phase, 'USAGE_USD', { usd }));
     this.emit(await this.journal.append(this.state.phase, 'BUDGET_UPDATE', lvl));
     if (this.governor.shouldPark()) await this.park('budget hard stop');
     return lvl;
@@ -269,6 +335,12 @@ function replay(j: Journal): ConductorState {
         break;
       case 'RECEIPTS':
         s.receipts = ev.payload as ConductorState['receipts'];
+        break;
+      case 'TEAM_PLAN':
+        s.teamNodes = ev.payload as ConductorState['teamNodes'];
+        break;
+      case 'TEAM_RESULTS':
+        s.teamResults = ev.payload as ConductorState['teamResults'];
         break;
       case 'REPORT':
         s.report = (ev.payload as { text: string }).text;
