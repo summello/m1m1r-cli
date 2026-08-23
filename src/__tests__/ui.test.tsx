@@ -8,6 +8,9 @@ import { Repl } from '../ui/repl.js';
 import { Cockpit } from '../ui/cockpit.js';
 import { Sidebar } from '../ui/sidebar.js';
 import { buildTree, treePrefix } from '../ui/repo-tree.js';
+import { wordmarkRows } from '../ui/wordmark.js';
+import { GALAXY_FULL } from '../ui/logo.js';
+import { enterAltScreen } from '../ui/alt-screen.js';
 import { INITIAL_UI_STATE, UiStore, type UiState } from '../ui/store.js';
 import { detectSupport, setSupport } from '../ui/theme.js';
 import { budgetToken } from '../ui/gauge.js';
@@ -74,13 +77,50 @@ describe('responsive cockpit components', () => {
     expect(frame).toContain('semi · openrouter');
   });
 
-  it('renders the welcome panel unboxed with runnable starter commands', () => {
+  it('renders the banner unboxed with the block wordmark and workspace identity', () => {
     setSupport('mono');
-    const frame = render(<WelcomePanel state={state()} width={100} userName="Sonam" projectPath="/repo" />).lastFrame()!;
-    expect(frame).toContain('✧ m1m1r');
+    const frame = render(
+      <WelcomePanel state={state()} width={120} userName="Sonam" projectPath="/repo/summello-cli" />,
+    ).lastFrame()!;
+    expect(frame).toContain('██');
+    expect(frame).toContain('Welcome back, Sonam.');
+    expect(frame).toContain('ox-alpha · high · openrouter');
+    expect(frame).toContain('/repo/summello-cli');
+    expect(frame).toContain('summello-cli · main');
     expect(frame).toContain('Get started');
-    expect(frame).toContain('m1m1r "<requirement>"');
+    expect(frame).toContain('What’s new');
+    expect(frame).toContain('Quick commands');
     expect(frame).not.toContain('╭');
+  });
+
+  it('falls back to the glyph mark when the block wordmark will not fit', () => {
+    setSupport('mono');
+    const frame = render(<WelcomePanel state={state()} width={60} projectPath="/repo" />).lastFrame()!;
+    expect(frame).toContain('✧ m1m1r');
+    expect(frame).not.toContain('██');
+  });
+
+  it('keeps every galaxy row the same width so the mark stays aligned', () => {
+    expect(new Set(GALAXY_FULL.map((row) => row.length)).size).toBe(1);
+    expect(GALAXY_FULL).toHaveLength(5);
+  });
+
+  it('writes the alternate-screen sequences only for a TTY', () => {
+    const written: string[] = [];
+    const tty = { isTTY: true, write: (text: string) => written.push(text) } as unknown as NodeJS.WriteStream;
+    enterAltScreen(tty)();
+    expect(written[0]).toContain('\x1b[?1049h');
+    expect(written[1]).toBe('\x1b[?1049l');
+
+    const piped = { isTTY: false, write: () => { throw new Error('must not write'); } } as unknown as NodeJS.WriteStream;
+    expect(() => enterAltScreen(piped)()).not.toThrow();
+  });
+
+  it('renders the wordmark as five solid rows of equal width', () => {
+    const rows = wordmarkRows();
+    expect(rows).toHaveLength(5);
+    expect(new Set(rows.map((row) => row.length)).size).toBe(1);
+    expect(rows.every((row) => row.includes('██'))).toBe(true);
   });
 
   it('renders a resume strip only when reopening an engagement', () => {

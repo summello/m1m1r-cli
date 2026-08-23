@@ -10,7 +10,7 @@ import { StatusLine } from './status-line.js';
 import type { UiStore } from './store.js';
 import { WelcomePanel, type WelcomePanelProps } from './welcome-panel.js';
 import { useTerminalSize } from './dimensions.js';
-import { tokenColor } from './theme.js';
+import { dimmable, tokenColor } from './theme.js';
 
 const RAIL_WIDTH = 30;
 const RAIL_MIN_TERMINAL = 100;
@@ -58,12 +58,13 @@ export function Cockpit({
   const engagementStarted =
     state.tasksSeen || state.agentsSeen || state.budgetSeen || state.usageSeen ||
     state.busy || state.phase !== 'INTAKE';
+  const bannerVisible = welcomeVisible && !engagementStarted;
 
   return (
     <Box flexDirection="column" width={terminal.width}>
       <Box flexDirection="row" width={terminal.width}>
         <Box flexDirection="column" width={mainWidth}>
-          {welcomeVisible && !engagementStarted && (
+          {bannerVisible && (
             <WelcomePanel
               state={state}
               width={mainWidth}
@@ -72,6 +73,11 @@ export function Cockpit({
               projectPath={projectPath}
               resumedEngagementId={resumedEngagementId}
             />
+          )}
+          {bannerVisible && (
+            <Box marginY={1}>
+              <Text dimColor={dimmable()}>{'─'.repeat(Math.max(1, mainWidth - 1))}</Text>
+            </Box>
           )}
           {engagementStarted && (
             <Box>
@@ -126,6 +132,7 @@ export function Cockpit({
           />
         </Box>
       )}
+      <Text dimColor={dimmable()}>{'─'.repeat(Math.max(1, terminal.width - 1))}</Text>
       <StatusLine state={state} width={terminal.width} projectPath={projectPath} />
     </Box>
   );

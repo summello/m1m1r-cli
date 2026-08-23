@@ -22,6 +22,7 @@ import { shellRun } from '../exec/shell-run.js';
 import { INITIAL_UI_STATE, UiStore } from '../ui/store.js';
 import { writeStatusline } from '../ui/statusline.js';
 import { Cockpit } from '../ui/cockpit.js';
+import { enterAltScreen } from '../ui/alt-screen.js';
 
 const execFileAsync = promisify(execFile);
 const ENGAGEMENTS_ROOT = join(process.cwd(), '.m1m1r', 'engagements');
@@ -185,6 +186,7 @@ async function startEngagementUi(conductor: Conductor, options: EngagementUiOpti
   }
 
   const command = makeCockpitCommandHandler(conductor, store);
+  const leaveAltScreen = enterAltScreen();
   const instance = render(React.createElement(Cockpit, {
     store,
     userName: process.env.USER ?? 'engineer',
@@ -211,6 +213,7 @@ async function startEngagementUi(conductor: Conductor, options: EngagementUiOpti
       unsubscribe();
       instance.unmount();
       instance.clear();
+      leaveAltScreen();
     },
   };
 }
@@ -292,6 +295,7 @@ async function welcomeCommand(): Promise<void> {
     branch: identity.branch,
     dirty: identity.dirty,
   });
+  const leaveAltScreen = enterAltScreen();
   const instance = render(React.createElement(Cockpit, {
     store,
     userName: process.env.USER ?? 'engineer',
@@ -301,9 +305,13 @@ async function welcomeCommand(): Promise<void> {
       ? '/model /sessions /init /quit · ! shell'
       : 'Start an engagement with: m1m1r "your requirement"',
   }), { exitOnCtrlC: true });
-  if (process.stdin.isTTY) await instance.waitUntilExit();
-  else instance.unmount();
-  instance.clear();
+  try {
+    if (process.stdin.isTTY) await instance.waitUntilExit();
+    else instance.unmount();
+  } finally {
+    instance.clear();
+    leaveAltScreen();
+  }
 }
 
 type ProviderChoice = 'anthropic' | 'openai-compat' | 'mixed';

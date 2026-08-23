@@ -41,7 +41,17 @@ export function Sidebar({ state, width, projectPath, paths: fixedPaths }: Sideba
   const contextTokens = state.usageTotals.promptTokens + state.usageTotals.completionTokens;
 
   return (
-    <Box flexDirection="column" width={width} paddingLeft={2}>
+    <Box
+      flexDirection="column"
+      width={width}
+      paddingLeft={2}
+      borderStyle="single"
+      borderColor={tokenColor('chrome')}
+      borderDimColor={dimmable()}
+      borderTop={false}
+      borderRight={false}
+      borderBottom={false}
+    >
       {state.usageSeen && (
         <Section label="Context">
           <Text dimColor={dimmable()}>{contextTokens.toLocaleString('en-US')} tokens</Text>
