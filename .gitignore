@@ -1,6 +1,10 @@
 node_modules/
 dist/
 .m1m1r/
+# Agent worktrees live inside the repo but are separate checkouts of it —
+# without this the repo sees each one's .git file and full working tree as
+# untracked content.
+.claude/worktrees/
 *.log
 .DS_Store
 research/
