@@ -95,12 +95,9 @@ export function Repl({ width, isActive = true, onCommand, onShell, onPrompt }: R
           ))}
         </Text>
       )}
-      <Box
-        width={terminal.width}
-        borderStyle="round"
-        borderColor={tokenColor('chrome')}
-        paddingX={1}
-      >
+      {/* No explicit width: a border adds two columns on top of it, which
+          overflows the parent and misaligns the frame. Let it stretch. */}
+      <Box borderStyle="round" borderColor={tokenColor('chrome')} paddingX={1}>
         <Text color={tokenColor(busy ? 'warn' : 'nebula')}>{busy ? '…' : '>'}</Text>
         <Text> {input}</Text>
         <Text color={tokenColor('core')}>▌</Text>

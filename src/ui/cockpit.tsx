@@ -8,12 +8,17 @@ import { Repl, type ReplProps } from './repl.js';
 import { Sidebar } from './sidebar.js';
 import { StatusLine } from './status-line.js';
 import type { UiStore } from './store.js';
-import { WelcomePanel, type WelcomePanelProps } from './welcome-panel.js';
+import { bannerRows, WelcomePanel, type WelcomePanelProps } from './welcome-panel.js';
 import { useTerminalSize } from './dimensions.js';
 import { dimmable, tokenColor } from './theme.js';
 
 const RAIL_WIDTH = 30;
 const RAIL_MIN_TERMINAL = 100;
+// Rows the pinned bottom chrome always occupies: blank line, bordered input
+// (3), rule, status bar.
+const BOTTOM_CHROME_ROWS = 6;
+// The banner's own divider: a blank line either side of the rule.
+const BANNER_RULE_ROWS = 3;
 
 export interface CockpitProps extends Pick<WelcomePanelProps,
   'version' | 'userName' | 'projectPath' | 'resumedEngagementId'> {
@@ -58,13 +63,20 @@ export function Cockpit({
   const engagementStarted =
     state.tasksSeen || state.agentsSeen || state.budgetSeen || state.usageSeen ||
     state.busy || state.phase !== 'INTAKE';
-  const bannerVisible = welcomeVisible && !engagementStarted;
+  // The banner is what yields when the terminal is short: the bottom chrome
+  // has to stay whole, and squeezing both makes Ink overlap the rows.
+  const bannerVisible =
+    welcomeVisible && !engagementStarted &&
+    terminal.height >= bannerRows(mainWidth) + BANNER_RULE_ROWS + BOTTOM_CHROME_ROWS;
 
   return (
-    <Box flexDirection="column" width={terminal.width}>
-      <Box flexDirection="row" width={terminal.width}>
+    // Fixed height plus a growing workspace pins the input and status bar to
+    // the bottom, so model output fills the space between them and the banner.
+    <Box flexDirection="column" width={terminal.width} height={terminal.height}>
+      <Box flexDirection="row" width={terminal.width} flexGrow={1}>
         <Box flexDirection="column" width={mainWidth}>
           {bannerVisible && (
+            <Box flexShrink={0}>
             <WelcomePanel
               state={state}
               width={mainWidth}
@@ -73,9 +85,10 @@ export function Cockpit({
               projectPath={projectPath}
               resumedEngagementId={resumedEngagementId}
             />
+            </Box>
           )}
           {bannerVisible && (
-            <Box marginY={1}>
+            <Box marginY={1} flexShrink={0}>
               <Text dimColor={dimmable()}>{'─'.repeat(Math.max(1, mainWidth - 1))}</Text>
             </Box>
           )}
@@ -89,40 +102,44 @@ export function Cockpit({
               />
             </Box>
           )}
-          {state.streams.slice(-3).map((stream) => (
-            <Text key={stream.id} wrap="wrap">
-              <Text color={tokenColor('orchid')}>{stream.role} › </Text>{stream.text}
-              {stream.streaming && <Text color={tokenColor('nebula')}>▌</Text>}
-            </Text>
-          ))}
-          {state.agents.length > 0 && (
-            <Box marginTop={1}>
-              <AgentTree agents={state.agents} width={mainWidth} />
-            </Box>
-          )}
-          {state.questions.map((question, index) => (
-            <QuestionCard
-              key={question.id}
-              question={question}
-              onAnswer={onAnswer}
-              width={mainWidth}
-              isActive={interactive && index === 0}
-            />
-          ))}
-          {(recentDiffs.length > 0 || recentTests.length > 0) && (
-            <Box flexDirection="column" marginTop={1}>
-              <Text color={tokenColor('orchid')}>Receipts</Text>
-              {recentDiffs.map((diff, index) => <DiffReceipt key={`d-${index}-${diff.file}`} diff={diff} width={mainWidth} />)}
-              {recentTests.map((test, index) => <DiffReceipt key={`t-${index}-${test.cmd}`} test={test} width={mainWidth} />)}
-            </Box>
-          )}
+          <Box flexDirection="column" flexGrow={1}>
+            {state.streams.slice(-3).map((stream) => (
+              <Text key={stream.id} wrap="wrap">
+                <Text color={tokenColor('orchid')}>{stream.role} › </Text>{stream.text}
+                {stream.streaming && <Text color={tokenColor('nebula')}>▌</Text>}
+              </Text>
+            ))}
+            {state.agents.length > 0 && (
+              <Box marginTop={1}>
+                <AgentTree agents={state.agents} width={mainWidth} />
+              </Box>
+            )}
+            {state.questions.map((question, index) => (
+              <QuestionCard
+                key={question.id}
+                question={question}
+                onAnswer={onAnswer}
+                width={mainWidth}
+                isActive={interactive && index === 0}
+              />
+            ))}
+            {(recentDiffs.length > 0 || recentTests.length > 0) && (
+              <Box flexDirection="column" marginTop={1}>
+                <Text color={tokenColor('orchid')}>Receipts</Text>
+                {recentDiffs.map((diff, index) => <DiffReceipt key={`d-${index}-${diff.file}`} diff={diff} width={mainWidth} />)}
+                {recentTests.map((test, index) => <DiffReceipt key={`t-${index}-${test.cmd}`} test={test} width={mainWidth} />)}
+              </Box>
+            )}
+          </Box>
         </Box>
         {railVisible && (
           <Sidebar state={state} width={RAIL_WIDTH} projectPath={projectPath} paths={repoPaths} />
         )}
       </Box>
+      {/* flexShrink={0} keeps the bottom chrome whole — without it flexbox
+          shrinks these alongside the workspace and Ink overlaps the rows. */}
       {interactive && (
-        <Box marginTop={1}>
+        <Box marginTop={1} flexShrink={0}>
           <Repl
             width={terminal.width}
             isActive={!questionOpen}
@@ -132,8 +149,10 @@ export function Cockpit({
           />
         </Box>
       )}
-      <Text dimColor={dimmable()}>{'─'.repeat(Math.max(1, terminal.width - 1))}</Text>
-      <StatusLine state={state} width={terminal.width} projectPath={projectPath} />
+      <Box flexShrink={0} flexDirection="column">
+        <Text dimColor={dimmable()}>{'─'.repeat(Math.max(1, terminal.width - 1))}</Text>
+        <StatusLine state={state} width={terminal.width} projectPath={projectPath} />
+      </Box>
     </Box>
   );
 }

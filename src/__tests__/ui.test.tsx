@@ -2,7 +2,7 @@ import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from 'ink-testing-library';
 import { StatusLine } from '../ui/status-line.js';
-import { WelcomePanel } from '../ui/welcome-panel.js';
+import { bannerRows, WelcomePanel } from '../ui/welcome-panel.js';
 import { QuestionCard } from '../ui/question-card.js';
 import { Repl } from '../ui/repl.js';
 import { Cockpit } from '../ui/cockpit.js';
@@ -98,6 +98,14 @@ describe('responsive cockpit components', () => {
     const frame = render(<WelcomePanel state={state()} width={60} projectPath="/repo" />).lastFrame()!;
     expect(frame).toContain('✧ m1m1r');
     expect(frame).not.toContain('██');
+  });
+
+  it.each([50, 64, 80, 130])('bannerRows(%i) matches what the banner actually renders', (width) => {
+    setSupport('mono');
+    const frame = render(
+      <WelcomePanel state={state()} width={width} projectPath="/repo/summello-cli" />,
+    ).lastFrame()!;
+    expect(frame.split('\n')).toHaveLength(bannerRows(width));
   });
 
   it('keeps every galaxy row the same width so the mark stays aligned', () => {

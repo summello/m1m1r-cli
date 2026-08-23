@@ -26,7 +26,6 @@ export function QuestionCard({ question, onAnswer, width, isActive = true }: Que
   return (
     <Box
       flexDirection="column"
-      width={terminal.width}
       borderStyle="round"
       borderColor={tokenColor(question.blocking ? 'alert' : 'chrome')}
       paddingX={1}
