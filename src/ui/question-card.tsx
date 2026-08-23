@@ -1,9 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { OpenQuestion } from '../conductor/conductor.js';
-import { GradientBox } from './gradient-box.js';
 import { useTerminalSize } from './dimensions.js';
-import { tokenColor } from './theme.js';
+import { dimmable, tokenColor } from './theme.js';
 
 export interface QuestionCardProps {
   question: OpenQuestion;
@@ -25,23 +24,24 @@ export function QuestionCard({ question, onAnswer, width, isActive = true }: Que
     else if (key.return) void onAnswer(question.id, options[selected]!.id);
   }, { isActive });
   return (
-    <GradientBox title={question.blocking ? 'BLOCKING QUESTION' : 'QUESTION'} width={terminal.width}>
-      <Text color={tokenColor(question.blocking ? 'alert' : 'orchid')} bold>{question.questionLayman}</Text>
-      {question.example && <Text>Example: {question.example}</Text>}
+    <Box
+      flexDirection="column"
+      width={terminal.width}
+      borderStyle="round"
+      borderColor={tokenColor(question.blocking ? 'alert' : 'chrome')}
+      paddingX={1}
+    >
+      <Text color={tokenColor(question.blocking ? 'alert' : 'orchid')}>{question.questionLayman}</Text>
+      {question.example && <Text dimColor={dimmable()}>Example: {question.example}</Text>}
       <Box flexDirection="column" marginTop={1}>
         {options.map((option, index) => (
-          <Text
-            key={option.id}
-            inverse={index === selected}
-            color={tokenColor(index === selected ? 'core' : 'orchid')}
-            backgroundColor={index === selected ? tokenColor('chrome') : undefined}
-          >
+          <Text key={option.id} inverse={index === selected}>
             {index + 1}. {option.label}{option.description ? ` — ${option.description}` : ''}
           </Text>
         ))}
       </Box>
-      {question.proposedDefault && <Text dimColor>Proposed default: {question.proposedDefault}</Text>}
-      <Text dimColor>↑/↓ choose · enter answer</Text>
-    </GradientBox>
+      {question.proposedDefault && <Text dimColor={dimmable()}>Proposed default: {question.proposedDefault}</Text>}
+      <Text dimColor={dimmable()}>↑/↓ choose · enter answer</Text>
+    </Box>
   );
 }

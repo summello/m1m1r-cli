@@ -1,7 +1,7 @@
 import React from 'react';
 import { Text } from 'ink';
 import { useTerminalSize } from './dimensions.js';
-import { tokenColor, type TokenName } from './theme.js';
+import { dimmable, tokenColor, type TokenName } from './theme.js';
 
 export interface GaugeProps {
   value: number | null;
@@ -13,16 +13,16 @@ export interface GaugeProps {
 
 export function Gauge({ value, label = '', width, color = 'violet', stale = false }: GaugeProps): React.JSX.Element {
   const terminal = useTerminalSize(width);
-  if (value === null) return <Text dimColor>{label ? `${label} —` : '—'}</Text>;
+  if (value === null) return <Text dimColor={dimmable()}>{label ? `${label} —` : '—'}</Text>;
   const pct = Math.max(0, Math.min(100, Math.round(value)));
   const suffix = ` ${pct}%`;
   const prefix = label ? `${label} ` : '';
   const cells = Math.max(1, terminal.width - prefix.length - suffix.length);
   const filled = Math.round((cells * pct) / 100);
   return (
-    <Text dimColor={stale}>
+    <Text dimColor={dimmable() && stale}>
       {prefix}<Text color={tokenColor(color)}>{'▓'.repeat(filled)}</Text>
-      <Text dimColor>{'░'.repeat(cells - filled)}</Text>{suffix}
+      <Text dimColor={dimmable()}>{'░'.repeat(cells - filled)}</Text>{suffix}
     </Text>
   );
 }
@@ -42,7 +42,7 @@ export function BudgetBar({ spent, ceiling, width, stale = false }: BudgetBarPro
   const label = `${amount} of $${ceiling}`;
   const gaugeWidth = Math.max(1, terminal.width - label.length - 1);
   return (
-    <Text dimColor={stale}>
+    <Text dimColor={dimmable() && stale}>
       <Text color={tokenColor(color)}>{label}</Text>{' '}
       <Gauge value={ratio} width={gaugeWidth} color={color} stale={stale} />
     </Text>

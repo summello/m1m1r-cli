@@ -1,8 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
-import { GradientBox } from './gradient-box.js';
 import { useTerminalSize } from './dimensions.js';
-import { tokenColor } from './theme.js';
+import { dimmable, tokenColor } from './theme.js';
 
 export const SLASH_COMMANDS = [
   '/agents', '/answer', '/budget', '/help', '/init', '/model', '/pause',
@@ -83,24 +82,29 @@ export function Repl({ width, isActive = true, onCommand, onShell, onPrompt }: R
   }, { isActive });
 
   return (
-    <GradientBox title="REPL" width={terminal.width}>
+    <Box flexDirection="column" width={terminal.width}>
       {lines.map((line) => (
-        <Text key={line.id} color={line.kind === 'error' ? tokenColor('alert') : line.kind === 'input' ? tokenColor('orchid') : undefined} wrap="truncate-end">
+        <Text key={line.id} color={line.kind === 'error' ? tokenColor('alert') : undefined} dimColor={dimmable() && line.kind === "input"} wrap="truncate-end">
           {line.text}
         </Text>
       ))}
       {suggestions.length > 0 && (
         <Text wrap="truncate-end">
           {suggestions.map((command, index) => (
-            <Text key={command} inverse={index === selected} backgroundColor={index === selected ? tokenColor('chrome') : undefined}>{index ? ' ' : ''}{command}</Text>
+            <Text key={command} inverse={index === selected}>{index ? ' ' : ''}{command}</Text>
           ))}
         </Text>
       )}
-      <Box>
-        <Text color={tokenColor(busy ? 'warn' : 'nebula')}>{busy ? '…' : '›'}</Text>
+      <Box
+        width={terminal.width}
+        borderStyle="round"
+        borderColor={tokenColor('chrome')}
+        paddingX={1}
+      >
+        <Text color={tokenColor(busy ? 'warn' : 'nebula')}>{busy ? '…' : '>'}</Text>
         <Text> {input}</Text>
         <Text color={tokenColor('core')}>▌</Text>
       </Box>
-    </GradientBox>
+    </Box>
   );
 }

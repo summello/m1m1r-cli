@@ -6,6 +6,8 @@ import { WelcomePanel } from '../ui/welcome-panel.js';
 import { QuestionCard } from '../ui/question-card.js';
 import { Repl } from '../ui/repl.js';
 import { Cockpit } from '../ui/cockpit.js';
+import { Sidebar } from '../ui/sidebar.js';
+import { buildTree, treePrefix } from '../ui/repo-tree.js';
 import { INITIAL_UI_STATE, UiStore, type UiState } from '../ui/store.js';
 import { detectSupport, setSupport } from '../ui/theme.js';
 import { budgetToken } from '../ui/gauge.js';
@@ -45,36 +47,40 @@ function state(patch: Partial<UiState> = {}): UiState {
 }
 
 describe('responsive cockpit components', () => {
-  it.each([
-    [60, '▶EXECUTE 12/18', false, false],
-    [80, 'STATUS', false, false],
-    [120, 'COCKPIT', true, true],
-  ] as const)('reflows the statusline at %i columns', (width, marker, session, control) => {
+  it.each([60, 80, 120] as const)('keeps the status bar to one line within %i columns', (width) => {
     setSupport('mono');
-    const frame = render(<StatusLine state={state()} width={width} now={10_100} />).lastFrame()!;
-    expect(frame).toContain(marker);
-    expect(frame.includes('SESSION')).toBe(session);
-    expect(frame.includes('CONTROL')).toBe(control);
+    const frame = render(
+      <StatusLine state={state()} width={width} projectPath="/repo" now={10_100} />,
+    ).lastFrame()!;
+    expect(frame).toContain('EXECUTE');
     expect(frame.split('\n').every((line) => line.length <= width)).toBe(true);
   });
 
-  it('stacks the welcome panel below 90 columns and uses the full galaxy in wide mode', () => {
+  it('shows the working directory and live session figures in the status bar', () => {
     setSupport('mono');
-    const narrow = render(<WelcomePanel state={state()} width={80} userName="Sonam" projectPath="/repo" />).lastFrame()!;
-    const wide = render(<WelcomePanel state={state()} width={120} userName="Sonam" projectPath="/repo" />).lastFrame()!;
-    expect(narrow).toContain('✧');
-    expect(narrow).not.toContain('.--=====--.');
-    expect(narrow.indexOf('Tips for getting started')).toBeGreaterThan(narrow.indexOf('main'));
-    expect(wide).toContain('.--=====--.');
-    expect(wide).toContain('Tips for getting started');
+    const frame = render(<StatusLine state={state()} width={120} projectPath="/repo" />).lastFrame()!;
+    expect(frame).toContain('/repo');
+    expect(frame).toContain('main');
+    expect(frame).toContain('12/18');
+    expect(frame).toContain('60.5K (34%)');
+    expect(frame).toContain('$14.20');
   });
 
-  it('shows an idle hint instead of the cockpit box before any engagement has run', () => {
+  it('omits engagement figures from the status bar before anything has run', () => {
     setSupport('mono');
-    const frame = render(<StatusLine state={INITIAL_UI_STATE} width={120} />).lastFrame()!;
-    expect(frame).toContain('no active engagement');
-    expect(frame).not.toContain('COCKPIT');
-    expect(frame).not.toContain('ENGAGEMENT');
+    const frame = render(<StatusLine state={INITIAL_UI_STATE} width={120} projectPath="/repo" />).lastFrame()!;
+    expect(frame).not.toContain('INTAKE');
+    expect(frame).not.toContain('0/0');
+    expect(frame).toContain('semi · openrouter');
+  });
+
+  it('renders the welcome panel unboxed with runnable starter commands', () => {
+    setSupport('mono');
+    const frame = render(<WelcomePanel state={state()} width={100} userName="Sonam" projectPath="/repo" />).lastFrame()!;
+    expect(frame).toContain('✧ m1m1r');
+    expect(frame).toContain('Get started');
+    expect(frame).toContain('m1m1r "<requirement>"');
+    expect(frame).not.toContain('╭');
   });
 
   it('renders a resume strip only when reopening an engagement', () => {
@@ -87,8 +93,40 @@ describe('responsive cockpit components', () => {
 
   it('emits no ANSI color escapes in mono mode', () => {
     setSupport('mono');
-    const frame = render(<StatusLine state={state()} width={120} />).lastFrame()!;
+    const frame = render(<StatusLine state={state()} width={120} projectPath="/repo" />).lastFrame()!;
     expect(frame).not.toMatch(/\x1b\[/);
+  });
+
+  it('builds a repo tree with directories first and depth capped', () => {
+    const tree = buildTree([
+      'README.md',
+      'src/ui/cockpit.tsx',
+      'src/bin/m1m1r.ts',
+      'package.json',
+    ]);
+    const rendered = tree.map((line) => `${treePrefix(line)}${line.name}`);
+    expect(tree[0]!.name).toBe('src');
+    expect(tree[0]!.isDir).toBe(true);
+    expect(rendered.some((line) => line.includes('README.md'))).toBe(true);
+    expect(tree.every((line) => line.depth <= 1)).toBe(true);
+    expect(rendered.some((line) => line.includes('cockpit.tsx'))).toBe(false);
+  });
+
+  it('lists repo files and session figures in the sidebar', () => {
+    setSupport('mono');
+    const frame = render(
+      <Sidebar
+        state={state()}
+        width={30}
+        projectPath="/repo"
+        paths={['README.md', 'src/ui/cockpit.tsx']}
+      />,
+    ).lastFrame()!;
+    expect(frame).toContain('Files');
+    expect(frame).toContain('src/');
+    expect(frame).toContain('README.md');
+    expect(frame).toContain('Context');
+    expect(frame).toContain('12/18 done');
   });
 
   it('detects NO_COLOR presence and TERM=dumb as mono terminals', () => {
@@ -155,6 +193,7 @@ describe('interactive surfaces', () => {
   });
 
   it('renders agent activity, streamed text, and inline diff/test receipts', async () => {
+    setSupport('mono');
     const store = new UiStore();
     store.apply({ ts: 1, id: '1', phase: 'EXECUTE', event: 'AGENT_STARTED', payload: { id: 'auth', role: 'implementer', task: 'fix auth' } });
     store.apply({ ts: 2, id: '2', phase: 'EXECUTE', event: 'STREAM_START', payload: { id: 's1', role: 'implementer' } });
