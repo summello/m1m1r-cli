@@ -8,6 +8,7 @@ import { dirname } from 'node:path';
 import { Redactor } from '../security/redact.js';
 import { makeEvidence, type Evidence, type EvidenceSource } from '../truth/evidence.js';
 import { auditReport, survivalRate, type AuditResult } from '../truth/auditor.js';
+import { HookBlockedError, HookRunner } from './hooks.js';
 
 export type Phase =
   | 'INTAKE'
@@ -231,6 +232,10 @@ export type ConductorState = {
 export class Conductor {
   state: ConductorState;
   readonly journal: Journal;
+  /** Project hooks (§3.6), when `.m1m1r/hooks/` was wired in by the caller.
+   * Undefined everywhere tests/embedded uses don't pass a dir — absence is
+   * the no-op default, never an error. */
+  readonly hooks?: HookRunner;
   private subs = new Set<Subscriber>();
   private governor: BudgetGovernor;
   private resumeWaiters = new Set<() => void>();
@@ -240,20 +245,24 @@ export class Conductor {
     journal: Journal,
     state: ConductorState,
     cfg: Config,
+    hooksDir?: string,
   ) {
     this.journal = journal;
     this.state = state;
     this.governor = new BudgetGovernor(cfg);
     this.state.budget = this.governor.snapshot();
+    this.hooks = hooksDir ? new HookRunner(hooksDir) : undefined;
   }
 
   /** Open existing engagement dir or create fresh one. Pass the process's own
    * Redactor (with runtime secrets like the API key registered) so journaled
-   * events get exact-match scrubbing too, not just the static patterns. */
-  static async open(dir: string, cfg?: Config, redactor?: Redactor): Promise<Conductor> {
+   * events get exact-match scrubbing too, not just the static patterns.
+   * `hooksDir` (§3.6) enables `.m1m1r/hooks/<event>.sh` interception of phase
+   * transitions — typically `<repoRoot>/.m1m1r/hooks`. */
+  static async open(dir: string, cfg?: Config, redactor?: Redactor, hooksDir?: string): Promise<Conductor> {
     const journal = await Journal.open(`${dir}/journal.jsonl`, redactor);
     const config = cfg ?? (await loadConfig());
-    const c = new Conductor(dir, journal, replay(journal), config);
+    const c = new Conductor(dir, journal, replay(journal), config, hooksDir);
     // Replay past usage through the governor so budget survives resume.
     for (const ev of journal.eventsAll) {
       if (ev.event === 'USAGE') {
@@ -286,8 +295,28 @@ export class Conductor {
     return ev;
   }
 
+  /** Phase transition with §3.6 hook interception: a non-zero-exit
+   * `phase-transition` hook halts the transition (state unchanged, HOOK_BLOCKED
+   * journaled for observability, HookBlockedError to the caller). The block is
+   * additive friction — the engagement stays in its prior phase, fully
+   * resumable; a later resume retries the same transition. */
   async transition(phase: Phase, event: string, payload?: unknown): Promise<void> {
     if (this.state.phase === 'PARKED' || this.state.phase === 'DONE') return;
+    if (this.hooks) {
+      const outcome = await this.hooks.fire('phase-transition', { to: phase, event }, {
+        phase: this.state.phase,
+        engagementDir: this.dir,
+      });
+      if (!outcome.ok) {
+        await this.record('HOOK_BLOCKED', {
+          hookEvent: 'phase-transition',
+          from: this.state.phase,
+          to: phase,
+          output: (outcome.output ?? '').slice(0, 1000),
+        });
+        throw new HookBlockedError('phase-transition', outcome.output ?? '');
+      }
+    }
     this.state.phase = phase;
     await this.record(event, payload, phase);
   }

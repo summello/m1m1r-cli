@@ -28,6 +28,25 @@ async function git(args: string[], cwd: string): Promise<string> {
 
 const CFG: Config = { budgetSoftWarnUsd: 10, budgetHardStopUsd: 25, prices: {} };
 
+// Fake review client that returns empty findings (passes all gates)
+function fakeReviewClient(): OpenAiCompat {
+  const fetchImpl: typeof fetch = async () =>
+    new Response(
+      JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: JSON.stringify({ findings: [] }) } }],
+        usage: { prompt_tokens: 5, completion_tokens: 5 },
+      }),
+    );
+  return new OpenAiCompat({
+    baseUrl: 'https://fake',
+    apiKey: 'k',
+    model: 'review-model',
+    redactor: new Redactor(),
+    onUsage: () => {},
+    fetchImpl,
+  });
+}
+
 const THREE_NODES = {
   nodes: [
     { id: 'n1', scope: ['file-0.txt'], acceptanceCriteria: 'file-0.txt exists', dependsOn: [], input: 'write file-0.txt' },
@@ -110,6 +129,7 @@ describe('runTeamEngagement — Phase 1 done-criterion', () => {
       concurrency: 3,
       pickImplementerRuntime: () => runtime,
       plannerClient: fakePlannerClient(),
+      reviewClient: fakeReviewClient(),
       integrationBranch,
     });
 
@@ -123,7 +143,7 @@ describe('runTeamEngagement — Phase 1 done-criterion', () => {
     }
   });
 
-  it('mixed-provider: implementers split across two different AgentRuntime instances, still merge conflict-free', async () => {
+it('mixed-provider: implementers split across two different AgentRuntime instances, still merge conflict-free', async () => {
     const conductor = await Conductor.open(engDir, CFG);
     await conductor.journal.append(conductor.state.phase, 'START', { requirement: 'three independent files' });
     conductor.state.requirement = 'three independent files';
@@ -142,6 +162,7 @@ describe('runTeamEngagement — Phase 1 done-criterion', () => {
       concurrency: 3,
       pickImplementerRuntime: pick,
       plannerClient: fakePlannerClient(),
+      reviewClient: fakeReviewClient(),
       integrationBranch,
     });
 
@@ -173,6 +194,7 @@ describe('runTeamEngagement — Phase 1 done-criterion', () => {
       concurrency: 3,
       pickImplementerRuntime: () => runtime,
       plannerClient: fakePlannerClient(),
+      reviewClient: fakeReviewClient(),
       integrationBranch,
     });
     expect(runtime.calls.length).toBe(3);
@@ -188,6 +210,7 @@ describe('runTeamEngagement — Phase 1 done-criterion', () => {
         throw new Error('should not launch any implementer on a DONE resume');
       },
       plannerClient: fakePlannerClient(),
+      reviewClient: fakeReviewClient(),
       integrationBranch,
     });
     expect(reopened.state.report).toBe(conductor.state.report);
@@ -223,6 +246,7 @@ describe('runTeamEngagement — Phase 1 done-criterion', () => {
       concurrency: 1,
       pickImplementerRuntime: () => runtime,
       plannerClient: fakePlannerClient(),
+      reviewClient: fakeReviewClient(),
       integrationBranch,
     });
 

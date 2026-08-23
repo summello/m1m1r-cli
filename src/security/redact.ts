@@ -1,13 +1,18 @@
 // Secret redaction (PLAN §3.6). Patterns always on; exact-match list for
-// values loaded at runtime (keychain secrets). Scrub before anything is journaled.
+// values loaded at runtime (keychain secrets). Scrub before anything is
+// journaled. The same patterns double as the security gate's structural
+// secret scan (§3.5): one definition, so the scanner can never drift from
+// the scrubber.
 
-const PATTERNS: RegExp[] = [
-  /sk-[A-Za-z0-9_-]{20,}/g, // OpenAI / OpenRouter style
-  /sk-ant-[^"'\s]+/g, // Anthropic
-  /gh[pousr]_[A-Za-z0-9]{36,}/g, // GitHub tokens
-  /AKIA[0-9A-Z]{16}/g, // AWS access keys
-  /xox[baprs]-[A-Za-z0-9-]{10,}/g, // Slack
+export const SECRET_PATTERNS: Array<{ name: string; re: RegExp }> = [
+  { name: 'openai-style-key', re: /sk-[A-Za-z0-9_-]{20,}/g }, // OpenAI / OpenRouter style
+  { name: 'anthropic-key', re: /sk-ant-[^"'\s]+/g }, // Anthropic
+  { name: 'github-token', re: /gh[pousr]_[A-Za-z0-9]{36,}/g }, // GitHub tokens
+  { name: 'aws-access-key', re: /AKIA[0-9A-Z]{16}/g }, // AWS access keys
+  { name: 'slack-token', re: /xox[baprs]-[A-Za-z0-9-]{10,}/g }, // Slack
 ];
+
+const PATTERNS: RegExp[] = SECRET_PATTERNS.map((p) => p.re);
 
 export class Redactor {
   private secrets = new Set<string>();

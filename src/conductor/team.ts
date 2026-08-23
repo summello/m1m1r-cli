@@ -1,7 +1,18 @@
 // Team engagement (PLAN §6 Phase 1 done-criterion: "one requirement fans
 // out to ≥3 concurrent implementers that merge conflict-free on a demo
 // repo"). planner -> task DAG -> N implementers in parallel worktrees ->
-// sequential merge into an integration branch -> optional test run -> report.
+// quality gates -> sequential merge into an integration branch -> suite ->
+// DoD checklist -> report.
+//
+// Phase 3 wires the four §3.5 gates in as VERIFY/INTEGRATE exit criteria:
+//   VERIFY    security + review per task diff (a failing-security diff never
+//             reaches the integration branch), then the receipts-based
+//             regression gate over survivors' captured TEST_RECEIPTs
+//   INTEGRATE merges, then the integrate gate (post-merge suite, ×3 flake
+//             discrimination)
+// An engagement-level gate failure parks the run (resumable; already-passed
+// gates are skipped on resume via their journaled verdicts). Task-level
+// blocks exclude just that task and surface as findings.
 //
 // Resume-aware the same coarse way as Phase 0's generic-agent.ts: each
 // major step is guarded on whether its persisted output already exists.
@@ -11,10 +22,22 @@
 
 import { mkdir } from 'node:fs/promises';
 import type { AgentRuntime } from '../runtime/agent-runtime.js';
-import { runToolLoop, type OpenAiCompat } from '../providers/openai-compat.js';
+import type { OpenAiCompat } from '../providers/openai-compat.js';
+import { runToolLoop } from '../providers/openai-compat.js';
+import type { JournalEvent } from './conductor.js';
 import { WorktreeManager, type WorktreeHandle } from '../exec/worktree.js';
 import { TaskDag, runDag, type TaskNode as DagNode } from './dag.js';
 import type { Conductor, PlannedTeamNode } from './conductor.js';
+import {
+  alreadyPassed,
+  blockedTaskIds,
+  dodChecklist,
+  gatesFromJournal,
+  runIntegrateGate,
+  runRegressionGate,
+  runReviewGate,
+  runSecurityGate,
+} from '../gates/gates.js';
 import { loadRole, DEFAULT_ROLES_DIR } from '../agents/registry.js';
 
 export interface TeamOptions {
@@ -29,9 +52,20 @@ export interface TeamOptions {
    * since the planner just needs one JSON-producing turn, not a tool loop
    * with file/shell access. */
   plannerClient: OpenAiCompat;
+  /** Single-turn JSON clients for the security-reviewer and code-reviewer
+   * gates — same shape as plannerClient (diff goes in findings JSON comes
+   * back; no tools offered, so read-only by construction). */
+  reviewClient: OpenAiCompat;
   integrationBranch: string;
   testCommand?: string;
   runTestCommand?: (cwd: string, cmd: string) => Promise<{ ok: boolean; output: string }>;
+}
+
+/** Task ids any task-level gate rejected — excluded from the merge. Derived
+ * from the journal (not from in-memory result flags) so a resumed process
+ * sees exactly what the first process saw. */
+function gateBlocked(events: readonly JournalEvent[]): Set<string> {
+  return blockedTaskIds(events);
 }
 
 export async function runTeamEngagement(conductor: Conductor, opts: TeamOptions): Promise<void> {
@@ -145,44 +179,118 @@ export async function runTeamEngagement(conductor: Conductor, opts: TeamOptions)
     for (const n of nodes) handles.set(n.id, { id: n.id, branch: `m1m1r/${n.id}`, path: `${opts.worktreesRoot}/${n.id}` });
   }
 
-  await conductor.transition('VERIFY', 'PHASE');
-  const failed = results.filter((r) => !r.ok);
-  await conductor.record('GATE_RESULT', {
-    gate: 'team-regression-lite',
-    pass: failed.length === 0,
-    failures: failed.map((f) => f.id),
-  }, 'VERIFY');
+  if (conductor.state.paused) return; // budget hard-stop mid-DAG: park cleanly, resume re-enters here
 
-  await conductor.transition('INTEGRATE', 'PHASE');
-  const merges: Array<{ id: string; ok: boolean; conflict: boolean }> = [];
+  await conductor.transition('VERIFY', 'PHASE');
+  const events = conductor.journal.eventsAll;
+  const blocked = gateBlocked(events);
+  const shouldStop = () => conductor.state.phase === 'PARKED';
+  const survivors = results.filter((r) => r.ok && !blocked.has(r.id));
+  if (survivors.length === 0) {
+    await conductor.park('all implementer tasks failed or were gate-blocked');
+    return;
+  }
+  const [securityRole, reviewRole] = await Promise.all([
+    loadRole(DEFAULT_ROLES_DIR, 'security-reviewer'),
+    loadRole(DEFAULT_ROLES_DIR, 'code-reviewer'),
+  ]);
+
+  // Task-level gates over each surviving implementer's diff. A task blocked
+  // here never reaches the integration branch (done-criterion: "a
+  // failing-security diff is blocked with findings"); the others proceed.
   for (const r of results) {
-    if (!r.ok) continue;
+    if (!r.ok || blocked.has(r.id)) continue;
     const handle = handles.get(r.id);
     if (!handle) continue;
-    const merge = await wm.mergeInto(opts.integrationBranch, handle);
-    merges.push({ id: r.id, ...merge });
-    await wm.cleanup(handle);
+
+    if (!alreadyPassed(events, 'security', r.id)) {
+      const verdict = await runSecurityGate(conductor, {
+        taskId: r.id,
+        diffText: await wm.diff(handle),
+        reviewerSystemPrompt: securityRole.systemPrompt,
+        reviewClient: opts.reviewClient,
+        shouldStop,
+      });
+      if (!verdict.pass) {
+        blocked.add(r.id);
+        continue;
+      }
+    }
+
+    if (!alreadyPassed(events, 'review', r.id)) {
+      const planned = nodes.find((n) => n.id === r.id);
+      const verdict = await runReviewGate(conductor, {
+        taskId: r.id,
+        diffText: await wm.diff(handle),
+        acceptanceCriteria: planned?.acceptanceCriteria ?? '',
+        reviewerSystemPrompt: reviewRole.systemPrompt,
+        reviewClient: opts.reviewClient,
+        shouldStop,
+      });
+      if (!verdict.pass) blocked.add(r.id);
+    }
   }
-  let testOutput = '';
-  if (opts.testCommand && opts.runTestCommand) {
-    const test = await opts.runTestCommand(opts.repoRoot, opts.testCommand);
-    await conductor.record('TEST_RECEIPT', {
-      taskId: 'integration',
-      cmd: opts.testCommand,
-      exit: test.ok ? 0 : 1,
-      outputRef: test.output.slice(0, 1000),
+
+  // Regression gate: receipts-based over the tasks still merging.
+  if (!alreadyPassed(events, 'regression')) {
+    const mergingIds = new Set(results.filter((r) => r.ok && !blocked.has(r.id)).map((r) => r.id));
+    const receipts = events.flatMap((ev) => {
+      if (ev.event !== 'TEST_RECEIPT') return [];
+      const p = ev.payload as { taskId?: string; cmd?: string; exit?: number | null };
+      if (!p.cmd || p.taskId?.startsWith('integration-attempt-')) return [];
+      return mergingIds.has(p.taskId ?? '') ? [{ taskId: p.taskId!, cmd: p.cmd, exit: p.exit ?? null }] : [];
     });
-    testOutput = `\n\n${opts.testCommand}: ${test.ok ? 'PASS' : 'FAIL'}\n${test.output.slice(0, 1000)}`;
+    const regression = await runRegressionGate(conductor, { receipts });
+    if (!regression.pass && !shouldStop()) {
+      await conductor.park('gate regression failed — fix or rewind, then resume');
+      return;
+    }
   }
-  await conductor.record('MERGE_RESULTS', merges, 'INTEGRATE');
+
+  if (conductor.state.paused) return;
+
+  await conductor.transition('INTEGRATE', 'PHASE');
+  type MergeRow = { id: string; ok: boolean; conflict: boolean };
+  let merges: MergeRow[] = (
+    events.find((ev) => ev.event === 'MERGE_RESULTS')?.payload as MergeRow[] | undefined
+  ) ?? [];
+  if (merges.length === 0) {
+    merges = [];
+    for (const r of results) {
+      if (!r.ok || blocked.has(r.id)) continue;
+      const handle = handles.get(r.id);
+      if (!handle) continue;
+      const merge = await wm.mergeInto(opts.integrationBranch, handle);
+      merges.push({ id: r.id, ...merge });
+      await wm.cleanup(handle);
+    }
+    await conductor.record('MERGE_RESULTS', merges, 'INTEGRATE');
+  }
+
+  if (!alreadyPassed(events, 'integrate')) {
+    const integrate = await runIntegrateGate(conductor, {
+      repoRoot: opts.repoRoot,
+      testCommand: opts.testCommand,
+      runTestCommand: opts.runTestCommand,
+      merges,
+      shouldStop,
+    });
+    if (!integrate.pass && !shouldStop()) {
+      await conductor.park(`gate integrate failed${integrate.flaky ? ' (FLAKY)' : ''} — resume to re-run`);
+      return;
+    }
+  }
+
+  if (conductor.state.paused) return;
 
   await conductor.transition('REPORT', 'PHASE');
+  const failedCount = results.filter((r) => !r.ok).length;
   const report =
-    `Fan-out: ${nodes.length} node(s), ${failed.length} failed\n` +
-    results.map((r) => `[${r.ok ? 'ok' : 'FAIL'}] ${r.id}`).join('\n') +
+    `Fan-out: ${nodes.length} node(s), ${failedCount} failed, ${blocked.size} gate-blocked\n` +
+    results.map((r) => `[${r.ok ? (blocked.has(r.id) ? 'BLOCKED' : 'ok') : 'FAIL'}] ${r.id}`).join('\n') +
     `\n\nMerges into ${opts.integrationBranch}:\n` +
     merges.map((m) => `[${m.ok ? 'merged' : m.conflict ? 'CONFLICT' : 'skipped'}] ${m.id}`).join('\n') +
-    testOutput;
+    `\n\n${dodChecklist(gatesFromJournal(conductor.journal.eventsAll))}`;
   await conductor.record('REPORT', { text: report }, 'REPORT');
   conductor.state.report = report;
   await conductor.complete();

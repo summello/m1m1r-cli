@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // CLI entry (PLAN §6 Phase 0: "CLI boots; one engagement runs end-to-end").
 // Commands: `m1m1r <requirement>` starts one, `m1m1r resume <id>` continues
-// one, `m1m1r secret <set|get|delete> <account> [value]` wraps the keychain.
+// one, `m1m1r rewind <id> [seq]` forks an engagement at a checkpoint (§3.1),
+// `m1m1r secret <set|get|delete> <account> [value]` wraps the keychain.
 
 import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -12,6 +13,8 @@ import { render } from 'ink';
 import { engagementDir, runEngagement } from '../agents/generic-agent.js';
 import { Conductor, loadConfig, newEngagementId, type Config } from '../conductor/conductor.js';
 import { runTeamEngagement } from '../conductor/team.js';
+import { listCheckpoints, rewindEngagement } from '../conductor/rewind.js';
+import { dodChecklist, gatesFromJournal } from '../gates/gates.js';
 import { OpenAiCompat } from '../providers/openai-compat.js';
 import { OpenAiCompatRuntime } from '../providers/openai-compat-runtime.js';
 import { AnthropicRuntime } from '../providers/anthropic-runtime.js';
@@ -26,6 +29,7 @@ import { enterAltScreen } from '../ui/alt-screen.js';
 
 const execFileAsync = promisify(execFile);
 const ENGAGEMENTS_ROOT = join(process.cwd(), '.m1m1r', 'engagements');
+const HOOKS_DIR = join(process.cwd(), '.m1m1r', 'hooks');
 
 function extractFlag(args: string[], name: string): { value?: string; rest: string[] } {
   const rest: string[] = [];
@@ -85,7 +89,7 @@ async function runOrResume(engDir: string, requirement: string | undefined, flag
   // useless — the ceiling could never actually engage).
   const configPath = flags.configPath ?? join(process.cwd(), '.m1m1r', 'config.json');
   const cfg = await loadConfig(configPath);
-  const conductor = await Conductor.open(engDir, cfg, redactor);
+  const conductor = await Conductor.open(engDir, cfg, redactor, HOOKS_DIR);
 
   if (!conductor.state.requirement) {
     if (!requirement) {
@@ -267,6 +271,16 @@ function makeCockpitCommandHandler(conductor: Conductor, store: UiStore) {
         return conductor.state.teamNodes?.map((node) => `${node.id}: ${node.input}`).join('\n')
           ?? conductor.state.planSteps?.map((step, index) => `${index + 1}: ${step.desc}`).join('\n')
           ?? 'No plan yet.';
+      case '/gates':
+        return dodChecklist(gatesFromJournal(conductor.journal.eventsAll));
+      case '/rewind': {
+        const checkpoints = listCheckpoints(conductor.journal.eventsAll);
+        if (checkpoints.length === 0) return 'No checkpointable positions yet.';
+        const list = checkpoints
+          .map((c) => `#${c.seq} [${c.phase}] ${c.label}`)
+          .join('\n');
+        return `${list}\nFork from one (after exiting this session):\n  m1m1r rewind ${basename(conductor.dir)} <seq>`;
+      }
       case '/init':
         try {
           await writeFile(join(process.cwd(), 'M1M1R.md'), '# M1M1R project conventions\n', { flag: 'wx' });
@@ -278,7 +292,7 @@ function makeCockpitCommandHandler(conductor: Conductor, store: UiStore) {
       case '/sessions':
         return 'Session catalog is not available in this phase; the current engagement remains journaled.';
       case '/help':
-        return '/pause /resume /redirect /answer /questions /agents /budget /model /mode /plan /init /quit · ! shell';
+        return '/pause /resume /redirect /answer /questions /agents /budget /model /mode /plan /gates /rewind /init /quit · ! shell';
       default:
         return `Unknown command: ${command}. Try /help.`;
     }
@@ -325,6 +339,7 @@ async function teamCommand(requirement: string, flags: {
   concurrency: number;
   integrationBranch?: string;
   testCommand?: string;
+  reviewModel?: string;
 }): Promise<void> {
   // The planner's single JSON-producing call always runs over openai-compat
   // (PLAN §4 — no file/shell tools needed for one turn, so there's no reason
@@ -361,7 +376,7 @@ async function teamCommand(requirement: string, flags: {
 
   const configPath = flags.configPath ?? join(process.cwd(), '.m1m1r', 'config.json');
   const cfg = await loadConfig(configPath);
-  const conductor = await Conductor.open(engDir, cfg, redactor);
+  const conductor = await Conductor.open(engDir, cfg, redactor, HOOKS_DIR);
   await conductor.journal.append(conductor.state.phase, 'START', { requirement });
   conductor.state.requirement = requirement;
 
@@ -380,6 +395,21 @@ async function teamCommand(requirement: string, flags: {
     },
   });
   const openAiRuntime = new OpenAiCompatRuntime(openAiClient);
+  // The security/review gates talk to the model through their own single-turn
+  // client (diff text in, findings JSON out — no tools offered, so the
+  // reviewer is read-only by construction). Defaults to the planner's model;
+  // --review-model points the judgment roles at a different (typically
+  // stronger) tier per §4.1's capability caveat.
+  const reviewModel = flags.reviewModel ?? model;
+  const reviewClient = new OpenAiCompat({
+    baseUrl,
+    apiKey: openAiApiKey,
+    model: reviewModel,
+    redactor,
+    onUsage: async (usage) => {
+      await conductor.charge(usage, reviewModel);
+    },
+  });
   const anthropicRuntime = needsAnthropic
     ? new AnthropicRuntime({
         model: anthropicModel!,
@@ -412,6 +442,7 @@ async function teamCommand(requirement: string, flags: {
       concurrency: flags.concurrency,
       pickImplementerRuntime: pick,
       plannerClient: openAiClient,
+      reviewClient,
       integrationBranch: flags.integrationBranch ?? `m1m1r/integration-${id}`,
       testCommand: flags.testCommand,
       runTestCommand: shellRun,
@@ -454,6 +485,49 @@ async function modelCommand(args: string[], configPath: string): Promise<void> {
   }
 }
 
+async function rewindCommand(args: string[]): Promise<void> {
+  const [id, seqArg] = args;
+  if (!id) {
+    console.error('Usage: m1m1r rewind <engagement-id> [seq]');
+    process.exit(1);
+  }
+  const srcJournal = join(ENGAGEMENTS_ROOT, id, 'journal.jsonl');
+  let events: Awaited<ReturnType<typeof Conductor.open>>['journal']['eventsAll'];
+  try {
+    const { Journal } = await import('../conductor/conductor.js');
+    events = (await Journal.open(srcJournal)).eventsAll;
+  } catch {
+    console.error(`No journal found for engagement ${id} under ${ENGAGEMENTS_ROOT}`);
+    process.exit(1);
+  }
+  const checkpoints = listCheckpoints(events);
+  if (!seqArg) {
+    if (checkpoints.length === 0) {
+      console.log('No checkpointable positions (phase transitions, gate passes, question answers).');
+      return;
+    }
+    console.log('Checkpointable positions:');
+    for (const c of checkpoints) console.log(`  #${c.seq}  [${c.phase}] ${c.label}`);
+    console.log('\nFork a new engagement from one:\n  m1m1r rewind <id> <seq>');
+    return;
+  }
+  const seq = Number(seqArg);
+  const checkpoint = checkpoints.find((c) => c.seq === seq);
+  if (!checkpoint) {
+    console.error(
+      `#${seqArg} is not a checkpointable position. Valid ones:\n` +
+        checkpoints.map((c) => `  #${c.seq}`).join(', '),
+    );
+    process.exit(1);
+  }
+  const newId = newEngagementId();
+  await rewindEngagement(srcJournal, engagementDir(ENGAGEMENTS_ROOT, newId), newId, seq);
+  console.log(
+    `Forked ${id} at #${seq} (${checkpoint.label}) into new engagement ${newId}\n` +
+      `Original untouched. Continue the fork with:\n  m1m1r resume ${newId}`,
+  );
+}
+
 async function secretCommand(args: string[]): Promise<void> {
   const [action, account, value] = args;
   if (!action || !account) {
@@ -492,8 +566,11 @@ async function main(): Promise<void> {
         'Usage:',
         '  m1m1r <requirement...>            single generic agent, one engagement',
         '  m1m1r team <requirement...>       planner fans out to N implementers in',
-        '                                    parallel worktrees, merges into one branch',
+        '                                    parallel worktrees, gates the diffs,',
+        '                                    merges into one branch',
         '  m1m1r resume <engagement-id>      continue a parked/interrupted engagement',
+        '  m1m1r rewind <engagement-id> [seq] list checkpoints, or fork a new',
+        '                                    engagement from journal position seq (§3.1)',
         '  m1m1r model ls                    list configured tier -> provider/model bindings',
         '  m1m1r model use <tier>=<provider>/<model>',
         '  m1m1r secret set <ACCOUNT> <val>  store an API key in the macOS keychain',
@@ -505,12 +582,13 @@ async function main(): Promise<void> {
         '  --base-url <url>        default https://openrouter.ai/api/v1',
         '  --config <path>         default .m1m1r/config.json (budget, prices, tiers)',
         '',
-        'Flags (team only):',
+'Flags (team only):',
         '  --provider <p>          anthropic | openai-compat (default) | mixed',
-        '  --anthropic-model <s>   required when --provider is anthropic or mixed',
+        '  --anthropic-model    required when --provider is anthropic or mixed',
         '  --implementers <n>      max concurrent implementers, default 3',
         '  --integration-branch <b> default m1m1r/integration-<engagement-id>',
         '  --test <cmd>            run once after merging, e.g. "npm test"',
+        '  --review-model <slug>   model for security/code reviewers (default: planner model)',
       ].join('\n'),
     );
     return;
@@ -518,6 +596,11 @@ async function main(): Promise<void> {
 
   if (argv[0] === 'secret') {
     await secretCommand(argv.slice(1));
+    return;
+  }
+
+  if (argv[0] === 'rewind') {
+    await rewindCommand(argv.slice(1));
     return;
   }
 
@@ -537,13 +620,14 @@ async function main(): Promise<void> {
     const { value: implementers, rest: t6 } = extractFlag(t5, 'implementers');
     const { value: integrationBranch, rest: t7 } = extractFlag(t6, 'integration-branch');
     const { value: testCommand, rest: t8 } = extractFlag(t7, 'test');
+    const { value: reviewModel, rest: t9 } = extractFlag(t8, 'review-model');
 
     const provider = (providerRaw ?? 'openai-compat') as ProviderChoice;
     if (!['anthropic', 'openai-compat', 'mixed'].includes(provider)) {
       console.error(`Unknown --provider ${providerRaw}. Use anthropic | openai-compat | mixed.`);
       process.exit(1);
     }
-    const requirement = t8.join(' ').trim();
+    const requirement = t9.join(' ').trim();
     if (!requirement) {
       console.error('No requirement given. Run `m1m1r --help` for usage.');
       process.exit(1);
@@ -557,6 +641,7 @@ async function main(): Promise<void> {
       concurrency: implementers ? Number(implementers) : 3,
       integrationBranch,
       testCommand,
+      reviewModel,
     });
     return;
   }

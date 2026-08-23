@@ -17,6 +17,10 @@ export interface WorktreeHandle {
   id: string;
   branch: string;
   path: string;
+  /** SHA the worktree branched from, captured at create() time. Optional —
+   * a resumed engagement re-derives handles without it (the journal records
+   * ids, not SHAs), and diff() then falls back to the merge-base. */
+  baseSha?: string;
 }
 
 export interface DiffStat {
@@ -61,7 +65,7 @@ export class WorktreeManager {
     await git(['branch', '-D', branch], this.repoRoot).catch(() => {});
     const baseSha = await git(['rev-parse', baseRef], this.repoRoot);
     await git(['worktree', 'add', '-b', branch, path, baseSha], this.repoRoot);
-    return { id, branch, path };
+    return { id, branch, path, baseSha };
   }
 
   async isDirty(w: WorktreeHandle): Promise<boolean> {
@@ -81,6 +85,15 @@ export class WorktreeManager {
         removed: removed === '-' ? 0 : Number(removed),
       }];
     });
+  }
+
+  /** Full unified diff of the worktree branch against its creation point —
+   * the exact text the security/review gates read (Phase 3). Prefers the
+   * captured baseSha; falls back to the merge-base with the repo's current
+   * HEAD for re-derived handles that predate base capture. */
+  async diff(w: WorktreeHandle): Promise<string> {
+    const base = w.baseSha ?? (await git(['merge-base', 'HEAD', w.branch], this.repoRoot));
+    return git(['diff', '--unified=3', `${base}..${w.branch}`], this.repoRoot);
   }
 
   /** Stage everything and commit inside the worktree. No-op (returns false)
