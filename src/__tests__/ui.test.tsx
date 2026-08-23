@@ -63,10 +63,18 @@ describe('responsive cockpit components', () => {
     const narrow = render(<WelcomePanel state={state()} width={80} userName="Sonam" projectPath="/repo" />).lastFrame()!;
     const wide = render(<WelcomePanel state={state()} width={120} userName="Sonam" projectPath="/repo" />).lastFrame()!;
     expect(narrow).toContain('✧');
-    expect(narrow).not.toContain('_.-=-._');
+    expect(narrow).not.toContain('.--=====--.');
     expect(narrow.indexOf('Tips for getting started')).toBeGreaterThan(narrow.indexOf('main'));
-    expect(wide).toContain('_.-=-._');
+    expect(wide).toContain('.--=====--.');
     expect(wide).toContain('Tips for getting started');
+  });
+
+  it('shows an idle hint instead of the cockpit box before any engagement has run', () => {
+    setSupport('mono');
+    const frame = render(<StatusLine state={INITIAL_UI_STATE} width={120} />).lastFrame()!;
+    expect(frame).toContain('no active engagement');
+    expect(frame).not.toContain('COCKPIT');
+    expect(frame).not.toContain('ENGAGEMENT');
   });
 
   it('renders a resume strip only when reopening an engagement', () => {

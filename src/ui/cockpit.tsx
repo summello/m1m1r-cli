@@ -64,7 +64,11 @@ export function Cockpit({
           {stream.streaming && <Text color={tokenColor('nebula')}>▌</Text>}
         </Text>
       ))}
-      <AgentTree agents={state.agents} width={terminal.width} />
+      {state.agents.length > 0 && (
+        <Box marginTop={1}>
+          <AgentTree agents={state.agents} width={terminal.width} />
+        </Box>
+      )}
       {state.questions.map((question, index) => (
         <QuestionCard
           key={question.id}
@@ -75,21 +79,25 @@ export function Cockpit({
         />
       ))}
       {(recentDiffs.length > 0 || recentTests.length > 0) && (
-        <Box flexDirection="column">
+        <Box flexDirection="column" marginTop={1}>
           <Text color={tokenColor('orchid')} bold>RECEIPTS</Text>
           {recentDiffs.map((diff, index) => <DiffReceipt key={`d-${index}-${diff.file}`} diff={diff} width={terminal.width} />)}
           {recentTests.map((test, index) => <DiffReceipt key={`t-${index}-${test.cmd}`} test={test} width={terminal.width} />)}
         </Box>
       )}
-      <StatusLine state={state} width={terminal.width} />
+      <Box marginTop={1}>
+        <StatusLine state={state} width={terminal.width} />
+      </Box>
       {interactive && (
-        <Repl
-          width={terminal.width}
-          isActive={!questionOpen}
-          onCommand={onCommand}
-          onShell={onShell}
-          onPrompt={onPrompt}
-        />
+        <Box marginTop={1}>
+          <Repl
+            width={terminal.width}
+            isActive={!questionOpen}
+            onCommand={onCommand}
+            onShell={onShell}
+            onPrompt={onPrompt}
+          />
+        </Box>
       )}
     </Box>
   );

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { galaxyFull, galaxyGlyph } from './logo.js';
+import { galaxyFull, galaxyGlyph, GALAXY_WIDTH } from './logo.js';
 import { useTerminalSize } from './dimensions.js';
 import { tokenColor } from './theme.js';
 
@@ -15,7 +15,7 @@ export function GalaxyLogo({ size = 'full', width }: GalaxyLogoProps): React.JSX
     return <Text color={tokenColor('core')}>{galaxyGlyph()}</Text>;
   }
   return (
-    <Box flexDirection="column" width={terminal.width}>
+    <Box flexDirection="column" width={Math.min(terminal.width, GALAXY_WIDTH)}>
       {galaxyFull().map((line, index) => <Text key={index}>{line}</Text>)}
     </Box>
   );

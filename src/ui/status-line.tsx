@@ -28,6 +28,13 @@ export function StatusLine({ state, width, now: fixedNow }: StatusLineProps): Re
   const tasks = state.tasksSeen ? `${state.tasksDone}/${state.tasksTotal}` : '—';
   const agents = state.agentsSeen ? `●${state.agentsActive} ○${state.agentsIdle}` : '—';
   const question = state.blockingQuestions ? ` ⚠${state.blockingQuestions}Q` : '';
+  const engagementStarted =
+    state.tasksSeen || state.agentsSeen || state.budgetSeen || state.usageSeen ||
+    state.busy || state.phase !== 'INTAKE';
+
+  if (!engagementStarted) {
+    return <Text dimColor>{'no active engagement — run m1m1r "<requirement>" or /plan'}</Text>;
+  }
 
   if (terminal.width < 70) {
     return <Text wrap="truncate-end">{renderMiniStatusline(state)}</Text>;
@@ -56,27 +63,31 @@ export function StatusLine({ state, width, now: fixedNow }: StatusLineProps): Re
   return (
     <GradientBox title="COCKPIT" width={terminal.width}>
       <Box flexDirection="column">
-        <Text color={tokenColor('orchid')} bold>ENGAGEMENT <Text color={tokenColor('alert')}>{question}</Text></Text>
+        <Text color={tokenColor('violet')} bold>ENGAGEMENT <Text color={tokenColor('alert')}>{question}</Text></Text>
         <PhasePipeline phase={state.phase} width={contentWidth} paused={state.paused} failed={state.gateFailed} />
-        <Text dimColor={agentsStale}>tasks {tasks} │ agents {agents}<Text color={tokenColor('alert')}>{question}</Text></Text>
+        {(state.tasksSeen || state.agentsSeen) && (
+          <Text dimColor={agentsStale}>tasks {tasks} │ agents {agents}<Text color={tokenColor('alert')}>{question}</Text></Text>
+        )}
       </Box>
-      <Box flexDirection="column" marginTop={1}>
-        <Text color={tokenColor('orchid')} bold>SESSION <Text color={tokenColor('alert')}>{question}</Text></Text>
-        <Box>
-          <Text wrap="truncate-end">{state.model ?? '—'} · {state.effort} │ </Text>
-          <BudgetBar
-            spent={state.budgetSeen ? state.budget.spentUsd : null}
-            ceiling={state.budget.ceilingUsd}
-            width={budgetWidth}
-            stale={usageStale}
-          />
-          <Text dimColor={usageStale}> │ ↑{state.usageSeen ? formatTokens(state.usageTotals.promptTokens) : '—'} ↓{state.usageSeen ? formatTokens(state.usageTotals.completionTokens) : '—'} │ </Text>
-          <Gauge value={state.ctxPct} label="ctx" width={ctxWidth} stale={usageStale} />
-          <Text color={tokenColor('alert')}>{question}</Text>
+      {(state.budgetSeen || state.usageSeen) && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={tokenColor('nebula')} bold>SESSION <Text color={tokenColor('alert')}>{question}</Text></Text>
+          <Box>
+            <Text wrap="truncate-end">{state.model ?? '—'} · {state.effort} │ </Text>
+            <BudgetBar
+              spent={state.budgetSeen ? state.budget.spentUsd : null}
+              ceiling={state.budget.ceilingUsd}
+              width={budgetWidth}
+              stale={usageStale}
+            />
+            <Text dimColor={usageStale}> │ ↑{state.usageSeen ? formatTokens(state.usageTotals.promptTokens) : '—'} ↓{state.usageSeen ? formatTokens(state.usageTotals.completionTokens) : '—'} │ </Text>
+            <Gauge value={state.ctxPct} label="ctx" width={ctxWidth} stale={usageStale} />
+            <Text color={tokenColor('alert')}>{question}</Text>
+          </Box>
         </Box>
-      </Box>
+      )}
       <Box flexDirection="column" marginTop={1}>
-        <Text color={tokenColor('orchid')} bold>CONTROL <Text color={tokenColor('alert')}>{question}</Text></Text>
+        <Text color={tokenColor('violet')} bold>CONTROL <Text color={tokenColor('alert')}>{question}</Text></Text>
         <Text wrap="truncate-end">
           {state.mode} │ {state.provider}·{state.account} │ {state.branch ?? '—'}{state.dirty ? '*' : ''} wt:{state.worktree} │ 5h {formatCost(state.fiveHourCost)} │ 7d {formatCost(state.sevenDayCost)}
           <Text color={tokenColor('alert')}>{question}</Text>

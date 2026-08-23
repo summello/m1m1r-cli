@@ -2,18 +2,17 @@
 import { gradient } from './theme.js';
 
 export const GALAXY_FULL = [
-  '       *    .       \u{2727}        .    *',
-  '    .          _.-=-._',
-  '         \u{2727}  ,-’  \u{2726}  ’-,         .',
-  '    .      ,’  ,-’’’-,  ’,',
-  '          /  ,’  (\u{2727})  ’,  \\      *',
-  '    -    |  |  ,’     ’,  |  -',
-  '         |  |  ’,     ,’  |',
-  '    .     \\  ’,  ’-...-’  ,’        .',
-  '     \u{2727}     ’,  ’-.......’  \u{2727}',
-  '    .    *   ’-,_     _,-’   .    *',
-  '           .     ’’’’’’’      .',
-  '       *     .    \u{2726}    .      *',
+  "        .       *       .        ",
+  "      .     .--=====--.     .    ",
+  "         ,-'     o     '-,       ",
+  "     .  /   ,-'''''''-,   \\  .  ",
+  "       |   /    (@)    \\   |    ",
+  "   -   |  |   ,-----,   |  |   - ",
+  "       |   \\  '-----'  /   |    ",
+  "     .  \\   '-.......-'   /  .  ",
+  "         '-,           ,-'       ",
+  "      .     '--.....--'     .    ",
+  "        .       *       .        ",
 ];
 
 /** Gradient-filled galaxy: rim violet -> arms orchid -> core white-hot.
@@ -30,3 +29,5 @@ export function galaxyFull(): string[] {
 export function galaxyGlyph(): string {
   return '\u{2727}';
 }
+
+export const GALAXY_WIDTH = Math.max(...GALAXY_FULL.map((line) => line.length));

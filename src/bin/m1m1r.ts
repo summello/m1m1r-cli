@@ -210,6 +210,7 @@ async function startEngagementUi(conductor: Conductor, options: EngagementUiOpti
       clearInterval(gitWatcher);
       unsubscribe();
       instance.unmount();
+      instance.clear();
     },
   };
 }
@@ -302,6 +303,7 @@ async function welcomeCommand(): Promise<void> {
   }), { exitOnCtrlC: true });
   if (process.stdin.isTTY) await instance.waitUntilExit();
   else instance.unmount();
+  instance.clear();
 }
 
 type ProviderChoice = 'anthropic' | 'openai-compat' | 'mixed';
