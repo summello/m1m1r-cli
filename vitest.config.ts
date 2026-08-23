@@ -6,7 +6,7 @@ import { defineConfig } from 'vitest/config';
 // disk). Scope discovery to this project's own tests.
 export default defineConfig({
   test: {
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
     exclude: ['node_modules', 'dist', 'research'],
   },
 });

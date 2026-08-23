@@ -19,6 +19,12 @@ export interface WorktreeHandle {
   path: string;
 }
 
+export interface DiffStat {
+  file: string;
+  added: number;
+  removed: number;
+}
+
 async function git(args: string[], cwd: string): Promise<string> {
   const { stdout } = await exec('git', args, { cwd });
   return stdout.trim();
@@ -61,6 +67,20 @@ export class WorktreeManager {
   async isDirty(w: WorktreeHandle): Promise<boolean> {
     const status = await git(['status', '--porcelain'], w.path);
     return status.length > 0;
+  }
+
+  async diffStat(w: WorktreeHandle): Promise<DiffStat[]> {
+    const output = await git(['diff', '--numstat', 'HEAD'], w.path);
+    if (!output) return [];
+    return output.split('\n').flatMap((line) => {
+      const [added, removed, file] = line.split('\t');
+      if (!file) return [];
+      return [{
+        file,
+        added: added === '-' ? 0 : Number(added),
+        removed: removed === '-' ? 0 : Number(removed),
+      }];
+    });
   }
 
   /** Stage everything and commit inside the worktree. No-op (returns false)

@@ -29,8 +29,9 @@ export const TOKENS: Record<TokenName, string> = {
 export type ColorSupport = 'truecolor' | '256' | 'mono';
 
 export function detectSupport(env: NodeJS.ProcessEnv = process.env): ColorSupport {
-  if (env.NO_COLOR) return 'mono';
+  if ('NO_COLOR' in env) return 'mono';
   const term = env.TERM ?? '';
+  if (term === 'dumb') return 'mono';
   if (env.COLORTERM === 'truecolor' || env.COLORTERM === '24bit') return 'truecolor';
   if (term.includes('256color')) return '256';
   if (env.TERMINAL_EMULATOR || env.ITERM_SESSION_ID || env.WT_SESSION) return 'truecolor';
@@ -46,6 +47,12 @@ export function setSupport(s: ColorSupport): void {
 export function getSupport(): ColorSupport {
   support ??= detectSupport();
   return support;
+}
+
+/** Color value for Ink's Text/Box props. Undefined in mono mode so Ink emits
+ * no color sequences at all. */
+export function tokenColor(token: TokenName): string | undefined {
+  return getSupport() === 'mono' ? undefined : TOKENS[token];
 }
 
 function hexToRgb(hex: string): [number, number, number] {

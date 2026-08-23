@@ -7,6 +7,8 @@ import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
+import React from 'react';
+import { render } from 'ink';
 import { engagementDir, runEngagement } from '../agents/generic-agent.js';
 import { Conductor, loadConfig, newEngagementId, type Config } from '../conductor/conductor.js';
 import { runTeamEngagement } from '../conductor/team.js';
@@ -16,8 +18,10 @@ import { AnthropicRuntime } from '../providers/anthropic-runtime.js';
 import type { AgentRuntime } from '../runtime/agent-runtime.js';
 import { secretDelete, secretGet, secretSet } from '../providers/keychain.js';
 import { Redactor } from '../security/redact.js';
+import { shellRun } from '../exec/shell-run.js';
 import { INITIAL_UI_STATE, UiStore } from '../ui/store.js';
 import { writeStatusline } from '../ui/statusline.js';
+import { Cockpit } from '../ui/cockpit.js';
 
 const execFileAsync = promisify(execFile);
 const ENGAGEMENTS_ROOT = join(process.cwd(), '.m1m1r', 'engagements');
@@ -91,13 +95,11 @@ async function runOrResume(engDir: string, requirement: string | undefined, flag
     conductor.state.requirement = requirement;
   }
 
-  const uiStore = new UiStore();
-  uiStore.set({ ...INITIAL_UI_STATE, model, provider: 'openai-compat' });
-  conductor.subscribe((ev) => {
-    uiStore.apply(ev);
-    writeStatusline(uiStore.getSnapshot());
+  const ui = await startEngagementUi(conductor, {
+    model,
+    provider: 'openai-compat',
+    resumedEngagementId: requirement ? undefined : basename(engDir),
   });
-  writeStatusline(uiStore.getSnapshot());
 
   const client = new OpenAiCompat({
     baseUrl,
@@ -112,7 +114,7 @@ async function runOrResume(engDir: string, requirement: string | undefined, flag
   try {
     await runEngagement(client, conductor, workDir);
   } finally {
-    process.stdout.write('\n');
+    ui.stop();
   }
 
   if (conductor.state.phase === 'PARKED') {
@@ -132,14 +134,174 @@ async function resolveAnthropicApiKey(): Promise<string | undefined> {
   }
 }
 
-async function shellRun(cwd: string, cmd: string): Promise<{ ok: boolean; output: string }> {
+interface EngagementUiOptions {
+  model: string | null;
+  provider: string;
+  resumedEngagementId?: string;
+}
+
+async function workspaceIdentity(): Promise<{ branch: string | null; dirty: boolean }> {
   try {
-    const { stdout, stderr } = await execFileAsync('sh', ['-c', cmd], { cwd, timeout: 120_000 });
-    return { ok: true, output: `${stdout}${stderr}` };
-  } catch (e: unknown) {
-    const err = e as { stdout?: string; stderr?: string };
-    return { ok: false, output: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+    const { stdout: branch } = await execFileAsync('git', ['branch', '--show-current'], { cwd: process.cwd() });
+    const { stdout: status } = await execFileAsync('git', ['status', '--porcelain'], { cwd: process.cwd() });
+    return { branch: branch.trim() || null, dirty: status.trim().length > 0 };
+  } catch {
+    return { branch: null, dirty: false };
   }
+}
+
+async function startEngagementUi(conductor: Conductor, options: EngagementUiOptions): Promise<{ stop: () => void }> {
+  const store = new UiStore();
+  store.hydrate(conductor.journal.eventsAll);
+  const identity = await workspaceIdentity();
+  store.set({
+    model: options.model,
+    provider: options.provider,
+    branch: identity.branch,
+    dirty: identity.dirty,
+    busy: conductor.state.phase !== 'DONE' && conductor.state.phase !== 'PARKED',
+  });
+  const unsubscribe = conductor.subscribe((event) => store.apply(event));
+  const gitWatcher = setInterval(() => {
+    void workspaceIdentity().then((next) => {
+      const current = store.getSnapshot();
+      if (current.branch !== next.branch || current.dirty !== next.dirty) store.set(next);
+    });
+  }, 1000);
+  gitWatcher.unref();
+
+  if (!process.stdout.isTTY || !process.stdin.isTTY) {
+    const redraw = () => writeStatusline(store.getSnapshot());
+    const unsubscribeMini = store.subscribe(redraw);
+    redraw();
+    return {
+      stop: () => {
+        clearInterval(gitWatcher);
+        unsubscribeMini();
+        unsubscribe();
+        process.stdout.write('\n');
+      },
+    };
+  }
+
+  const command = makeCockpitCommandHandler(conductor, store);
+  const instance = render(React.createElement(Cockpit, {
+    store,
+    userName: process.env.USER ?? 'engineer',
+    projectPath: process.cwd(),
+    resumedEngagementId: options.resumedEngagementId,
+    onAnswer: (id: string, answer: string) => conductor.answerQuestion(id, answer),
+    onCommand: command,
+    onShell: (cmd: string) => shellRun(process.cwd(), cmd),
+    onPrompt: async (prompt: string, onDelta: (text: string) => void) => {
+      const id = `steer-${Date.now()}`;
+      await conductor.record('HUMAN_NOTE', { prompt });
+      await conductor.record('STREAM_START', { id, role: 'conductor' });
+      for (const chunk of ['Steering note ', 'recorded. Use ', '/redirect <task> <instruction> ', 'to change queued work.']) {
+        onDelta(chunk);
+        await conductor.record('STREAM_DELTA', { id, text: chunk });
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      await conductor.record('STREAM_END', { id });
+    },
+  }), { exitOnCtrlC: true });
+  return {
+    stop: () => {
+      clearInterval(gitWatcher);
+      unsubscribe();
+      instance.unmount();
+    },
+  };
+}
+
+function makeCockpitCommandHandler(conductor: Conductor, store: UiStore) {
+  return async (command: string, args: string[]): Promise<string> => {
+    switch (command) {
+      case '/pause':
+        await conductor.pause();
+        return 'Engagement paused after the current provider turn.';
+      case '/resume':
+        await conductor.resumeRun();
+        return 'Engagement resumed.';
+      case '/answer': {
+        const [id, ...answerParts] = args;
+        if (!id || answerParts.length === 0) return 'Usage: /answer <question-id> <answer>';
+        await conductor.answerQuestion(id, answerParts.join(' '));
+        return `Answered ${id}.`;
+      }
+      case '/redirect': {
+        const [id, ...instructionParts] = args;
+        if (!id || instructionParts.length === 0) return 'Usage: /redirect <task-id> <instruction>';
+        await conductor.redirectTask(id, instructionParts.join(' '));
+        return `Redirect recorded for ${id}; it will be applied before that task starts.`;
+      }
+      case '/mode': {
+        const modes = ['supervised', 'semi', 'full'];
+        const current = store.getSnapshot().mode;
+        const requested = args[0];
+        const mode = requested && modes.includes(requested)
+          ? requested
+          : modes[(modes.indexOf(current) + 1) % modes.length]!;
+        await conductor.record('CONTROL_MODE', { mode });
+        return `Autonomy mode: ${mode}.`;
+      }
+      case '/questions': {
+        const questions = store.getSnapshot().questions;
+        return questions.length ? questions.map((question) => `${question.id}: ${question.questionLayman}`).join('\n') : 'No open questions.';
+      }
+      case '/agents': {
+        const agents = store.getSnapshot().agents;
+        return agents.length ? agents.map((agent) => `${agent.id} ${agent.status}: ${agent.task}`).join('\n') : 'No agents have started yet.';
+      }
+      case '/budget': {
+        const state = store.getSnapshot();
+        return state.budgetSeen ? `$${state.budget.spentUsd.toFixed(2)} of $${state.budget.ceilingUsd}` : 'Budget spend — (no usage event yet).';
+      }
+      case '/model':
+        return `${store.getSnapshot().provider}/${store.getSnapshot().model ?? '—'}`;
+      case '/plan':
+        return conductor.state.teamNodes?.map((node) => `${node.id}: ${node.input}`).join('\n')
+          ?? conductor.state.planSteps?.map((step, index) => `${index + 1}: ${step.desc}`).join('\n')
+          ?? 'No plan yet.';
+      case '/init':
+        try {
+          await writeFile(join(process.cwd(), 'M1M1R.md'), '# M1M1R project conventions\n', { flag: 'wx' });
+          return 'Created M1M1R.md.';
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code === 'EEXIST') return 'M1M1R.md already exists.';
+          throw error;
+        }
+      case '/sessions':
+        return 'Session catalog is not available in this phase; the current engagement remains journaled.';
+      case '/help':
+        return '/pause /resume /redirect /answer /questions /agents /budget /model /mode /plan /init /quit · ! shell';
+      default:
+        return `Unknown command: ${command}. Try /help.`;
+    }
+  };
+}
+
+async function welcomeCommand(): Promise<void> {
+  const store = new UiStore();
+  const identity = await workspaceIdentity();
+  store.set({
+    ...INITIAL_UI_STATE,
+    model: process.env.M1M1R_MODEL ?? null,
+    provider: process.env.M1M1R_PROVIDER ?? 'openrouter',
+    branch: identity.branch,
+    dirty: identity.dirty,
+  });
+  const instance = render(React.createElement(Cockpit, {
+    store,
+    userName: process.env.USER ?? 'engineer',
+    projectPath: process.cwd(),
+    onShell: (cmd: string) => shellRun(process.cwd(), cmd),
+    onCommand: async (command: string) => command === '/help'
+      ? '/model /sessions /init /quit · ! shell'
+      : 'Start an engagement with: m1m1r "your requirement"',
+  }), { exitOnCtrlC: true });
+  if (process.stdin.isTTY) await instance.waitUntilExit();
+  else instance.unmount();
 }
 
 type ProviderChoice = 'anthropic' | 'openai-compat' | 'mixed';
@@ -193,13 +355,10 @@ async function teamCommand(requirement: string, flags: {
   await conductor.journal.append(conductor.state.phase, 'START', { requirement });
   conductor.state.requirement = requirement;
 
-  const uiStore = new UiStore();
-  uiStore.set({ ...INITIAL_UI_STATE, model: model ?? anthropicModel ?? null, provider: flags.provider });
-  conductor.subscribe((ev) => {
-    uiStore.apply(ev);
-    writeStatusline(uiStore.getSnapshot());
+  const ui = await startEngagementUi(conductor, {
+    model: model ?? anthropicModel ?? null,
+    provider: flags.provider,
   });
-  writeStatusline(uiStore.getSnapshot());
 
   const openAiClient = new OpenAiCompat({
     baseUrl,
@@ -248,7 +407,7 @@ async function teamCommand(requirement: string, flags: {
       runTestCommand: shellRun,
     });
   } finally {
-    process.stdout.write('\n');
+    ui.stop();
   }
 
   if (conductor.state.phase === 'PARKED') {
@@ -311,7 +470,11 @@ async function secretCommand(args: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  if (argv[0] === '--help' || argv[0] === '-h' || argv.length === 0) {
+  if (argv.length === 0) {
+    await welcomeCommand();
+    return;
+  }
+  if (argv[0] === '--help' || argv[0] === '-h') {
     console.log(
       [
         'm1m1r — autonomous engineering team harness',

@@ -190,6 +190,15 @@ export interface TeamNodeResult {
   text: string;
 }
 
+export interface OpenQuestion {
+  id: string;
+  blocking: boolean;
+  questionLayman: string;
+  example?: string;
+  proposedDefault?: string;
+  options?: Array<{ id: string; label: string; description?: string }>;
+}
+
 export type ConductorState = {
   id: string;
   phase: Phase;
@@ -200,6 +209,9 @@ export type ConductorState = {
   budget: BudgetLevel;
   usageTotals: { promptTokens: number; completionTokens: number };
   blockingQuestion?: unknown;
+  openQuestions: OpenQuestion[];
+  paused: boolean;
+  taskRedirects: Record<string, string>;
   // Team/DAG engagement state (PLAN §6 Phase 1) — kept separate from
   // planSteps/receipts above (Phase 0's single-agent shape) rather than
   // reusing those fields for a structurally different flow.
@@ -213,6 +225,7 @@ export class Conductor {
   readonly journal: Journal;
   private subs = new Set<Subscriber>();
   private governor: BudgetGovernor;
+  private resumeWaiters = new Set<() => void>();
 
   private constructor(
     public readonly dir: string,
@@ -255,10 +268,67 @@ export class Conductor {
     for (const fn of this.subs) fn(ev);
   }
 
+  /** Persist an engagement fact and publish the exact same event to live UI
+   * subscribers. Artifact writers use this instead of calling Journal.append
+   * directly so the journal remains the single source of truth without
+   * making the cockpit poll the filesystem. */
+  async record(event: string, payload?: unknown, phase: Phase = this.state.phase): Promise<JournalEvent> {
+    const ev = await this.journal.append(phase, event, payload);
+    this.emit(ev);
+    return ev;
+  }
+
   async transition(phase: Phase, event: string, payload?: unknown): Promise<void> {
     if (this.state.phase === 'PARKED' || this.state.phase === 'DONE') return;
     this.state.phase = phase;
-    this.emit(await this.journal.append(phase, event, payload));
+    await this.record(event, payload, phase);
+  }
+
+  async pause(): Promise<void> {
+    if (this.state.paused || this.state.phase === 'DONE') return;
+    this.state.paused = true;
+    await this.record('CONTROL_PAUSED');
+  }
+
+  async resumeRun(): Promise<void> {
+    if (!this.state.paused) return;
+    this.state.paused = false;
+    await this.record('CONTROL_RESUMED');
+    for (const resolve of this.resumeWaiters) resolve();
+    this.resumeWaiters.clear();
+  }
+
+  async waitWhilePaused(): Promise<void> {
+    while (this.state.paused) {
+      await new Promise<void>((resolve) => this.resumeWaiters.add(resolve));
+    }
+  }
+
+  async answerQuestion(id: string, answer: string): Promise<void> {
+    const question = this.state.openQuestions.find((item) => item.id === id);
+    if (!question) throw new Error(`unknown open question: ${id}`);
+    this.state.openQuestions = this.state.openQuestions.filter((item) => item.id !== id);
+    this.state.blockingQuestion = this.state.openQuestions.find((item) => item.blocking);
+    await this.record('QUESTION_ANSWERED', { id, answer });
+  }
+
+  async raiseQuestion(question: OpenQuestion): Promise<void> {
+    if (this.state.openQuestions.some((item) => item.id === question.id)) return;
+    this.state.openQuestions.push(question);
+    if (question.blocking) this.state.blockingQuestion = question;
+    await this.record('QUESTION_RAISED', question);
+  }
+
+  async redirectTask(id: string, instruction: string): Promise<void> {
+    const known = this.state.teamNodes?.some((node) => node.id === id) ?? false;
+    if (!known) throw new Error(`unknown task: ${id}`);
+    this.state.taskRedirects[id] = instruction;
+    await this.record('TASK_REDIRECTED', { id, instruction });
+  }
+
+  taskInput(id: string, original: string): string {
+    const redirect = this.state.taskRedirects[id];
+    return redirect ? `${original}\n\nHuman redirect: ${redirect}` : original;
   }
 
   // Awaited end to end, not fire-and-forget: a `kill -9` landing between
@@ -316,6 +386,9 @@ function replay(j: Journal): ConductorState {
     phase: 'INTAKE',
     budget: { spentUsd: 0, ceilingUsd: 25, level: 'ok' },
     usageTotals: { promptTokens: 0, completionTokens: 0 },
+    openQuestions: [],
+    paused: false,
+    taskRedirects: {},
   };
   for (const ev of j.eventsAll) {
     if (!s.id) s.id = ev.id.slice(0, 8); // stable display id from first event
@@ -346,11 +419,26 @@ function replay(j: Journal): ConductorState {
         s.report = (ev.payload as { text: string }).text;
         break;
       case 'QUESTION_RAISED':
-        s.blockingQuestion = ev.payload;
+        s.openQuestions.push(ev.payload as OpenQuestion);
+        if ((ev.payload as OpenQuestion).blocking) s.blockingQuestion = ev.payload;
         break;
       case 'QUESTION_ANSWERED':
-        s.blockingQuestion = undefined;
+        s.openQuestions = s.openQuestions.filter(
+          (question) => question.id !== (ev.payload as { id: string }).id,
+        );
+        s.blockingQuestion = s.openQuestions.find((question) => question.blocking);
         break;
+      case 'CONTROL_PAUSED':
+        s.paused = true;
+        break;
+      case 'CONTROL_RESUMED':
+        s.paused = false;
+        break;
+      case 'TASK_REDIRECTED': {
+        const redirect = ev.payload as { id: string; instruction: string };
+        s.taskRedirects[redirect.id] = redirect.instruction;
+        break;
+      }
       default:
         break;
     }

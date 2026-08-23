@@ -68,7 +68,7 @@ export async function runEngagement(
     } catch {
       steps = [{ desc: 'unparsed plan — see report', shell: 'true' }];
     }
-    await conductor.journal.append('PLAN', 'PLAN', steps);
+    await conductor.record('PLAN', steps, 'PLAN');
     conductor.state.planSteps = steps;
 
     await conductor.transition('APPROVE', 'AUTO_APPROVED', { mode: 'semi-phase0' });
@@ -90,7 +90,10 @@ export async function runEngagement(
       () => conductor.state.phase === 'PARKED',
     );
     execResultContent = execResult.content;
-    await conductor.journal.append('EXECUTE', 'RECEIPTS', fresh);
+    await conductor.record('RECEIPTS', fresh, 'EXECUTE');
+    for (const receipt of fresh) {
+      await conductor.record('TEST_RECEIPT', { taskId: 'generic', ...receipt }, 'EXECUTE');
+    }
     conductor.state.receipts = fresh;
     receipts = fresh;
   }
@@ -98,18 +101,18 @@ export async function runEngagement(
   await conductor.transition('VERIFY', 'PHASE');
   // Re-run any test-ish command from receipts to confirm green.
   const verifyFailures = receipts.filter((r) => r.exit !== null && r.exit !== 0);
-  await conductor.journal.append('VERIFY', 'GATE_RESULT', {
+  await conductor.record('GATE_RESULT', {
     gate: 'regression-lite',
     pass: verifyFailures.length === 0,
     failures: verifyFailures.map((f) => f.cmd),
-  });
+  }, 'VERIFY');
 
   await conductor.transition('REPORT', 'PHASE');
   const report =
     `Plan: ${steps.length} step(s)\n` +
     receipts.map((r) => `[${r.exit === 0 ? 'ok' : `exit ${r.exit}`}] ${r.cmd}`).join('\n') +
     (execResultContent ? `\n\n${execResultContent.slice(0, 1000)}` : '');
-  await conductor.journal.append('REPORT', 'REPORT', { text: report });
+  await conductor.record('REPORT', { text: report }, 'REPORT');
   conductor.state.report = report;
   await conductor.complete();
 }

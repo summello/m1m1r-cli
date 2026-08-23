@@ -192,4 +192,41 @@ describe('runTeamEngagement — Phase 1 done-criterion', () => {
     });
     expect(reopened.state.report).toBe(conductor.state.report);
   });
+
+  it('a budget hard-stop mid-DAG (conductor.state.phase -> PARKED) stops further implementer launches', async () => {
+    // Regression test: an independent review found runDag kept launching
+    // every already-ready node regardless of the conductor parking mid-run —
+    // the hard-stop was cosmetic for any node not already in flight at that
+    // instant. concurrency:1 makes this deterministic: n1 parks the
+    // conductor as a side effect of "spending," and n2/n3 (both ready with
+    // no dependency on n1) must never launch afterward.
+    const conductor = await Conductor.open(engDir, CFG);
+    await conductor.journal.append(conductor.state.phase, 'START', { requirement: 'req' });
+    conductor.state.requirement = 'req';
+
+    class ParkingRuntime implements AgentRuntime {
+      calls: string[] = [];
+      async runTask(input: TaskInput): Promise<TaskResult> {
+        const id = basename(input.cwd);
+        this.calls.push(id);
+        if (id === 'n1') await conductor.park('budget hard stop (test)');
+        return { text: 'done', receipts: [], isError: false };
+      }
+    }
+    const runtime = new ParkingRuntime();
+    const integrationBranch = 'integration-park';
+    await git(['branch', integrationBranch], repoRoot);
+
+    await runTeamEngagement(conductor, {
+      repoRoot,
+      worktreesRoot: join(engDir, 'worktrees'),
+      concurrency: 1,
+      pickImplementerRuntime: () => runtime,
+      plannerClient: fakePlannerClient(),
+      integrationBranch,
+    });
+
+    expect(runtime.calls).toEqual(['n1']); // n2/n3 never launched
+    expect(conductor.state.phase).toBe('PARKED');
+  });
 });

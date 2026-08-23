@@ -71,7 +71,7 @@ export async function runTeamEngagement(conductor: Conductor, opts: TeamOptions)
     if (nodes.length === 0) {
       throw new Error('planner produced no task nodes — nothing to fan out');
     }
-    await conductor.journal.append('PLAN', 'TEAM_PLAN', nodes);
+    await conductor.record('TEAM_PLAN', nodes, 'PLAN');
     conductor.state.teamNodes = nodes;
     await conductor.transition('APPROVE', 'AUTO_APPROVED', { mode: 'semi-phase1' });
   }
@@ -96,20 +96,46 @@ export async function runTeamEngagement(conductor: Conductor, opts: TeamOptions)
 
     const runNode = async (dagNode: DagNode) => {
       const planned = nodes!.find((n) => n.id === dagNode.id)!;
+      await conductor.waitWhilePaused();
+      await conductor.record('AGENT_STARTED', {
+        id: dagNode.id,
+        role: dagNode.role,
+        task: dagNode.input,
+      });
       const handle = await wm.create(dagNode.id);
       handles.set(dagNode.id, handle);
       const runtime = opts.pickImplementerRuntime(planned, [...handles.keys()].indexOf(dagNode.id));
-      const result = await runtime.runTask({
-        systemPrompt: implementerRole.systemPrompt,
-        userPrompt: `Task: ${dagNode.input}\nScope: ${dagNode.scope.join(', ')}\nAcceptance criteria: ${dagNode.acceptanceCriteria}`,
-        cwd: handle.path,
-      });
-      if (!result.isError) await wm.commit(handle, `implement ${dagNode.id}`);
-      return { id: dagNode.id, ok: !result.isError, text: result.text };
+      try {
+        const result = await runtime.runTask({
+          systemPrompt: implementerRole.systemPrompt,
+          userPrompt: `Task: ${conductor.taskInput(dagNode.id, dagNode.input)}\nScope: ${dagNode.scope.join(', ')}\nAcceptance criteria: ${dagNode.acceptanceCriteria}`,
+          cwd: handle.path,
+        });
+        for (const stat of await wm.diffStat(handle)) {
+          await conductor.record('DIFF_RECEIPT', { taskId: dagNode.id, ...stat });
+        }
+        for (const receipt of result.receipts) {
+          await conductor.record('TEST_RECEIPT', { taskId: dagNode.id, ...receipt });
+        }
+        if (!result.isError) await wm.commit(handle, `implement ${dagNode.id}`);
+        await conductor.record('AGENT_FINISHED', {
+          id: dagNode.id,
+          role: dagNode.role,
+          ok: !result.isError,
+        });
+        return { id: dagNode.id, ok: !result.isError, text: result.text };
+      } catch (error: unknown) {
+        await conductor.record('AGENT_FINISHED', {
+          id: dagNode.id,
+          role: dagNode.role,
+          ok: false,
+        });
+        throw error;
+      }
     };
 
-    results = await runDag(dag, runNode, opts.concurrency);
-    await conductor.journal.append('EXECUTE', 'TEAM_RESULTS', results);
+    results = await runDag(dag, runNode, opts.concurrency, () => conductor.state.phase === 'PARKED');
+    await conductor.record('TEAM_RESULTS', results, 'EXECUTE');
     conductor.state.teamResults = results;
   } else {
     // Resumed past EXECUTE — worktrees from that run are gone (or were never
@@ -121,11 +147,11 @@ export async function runTeamEngagement(conductor: Conductor, opts: TeamOptions)
 
   await conductor.transition('VERIFY', 'PHASE');
   const failed = results.filter((r) => !r.ok);
-  await conductor.journal.append('VERIFY', 'GATE_RESULT', {
+  await conductor.record('GATE_RESULT', {
     gate: 'team-regression-lite',
     pass: failed.length === 0,
     failures: failed.map((f) => f.id),
-  });
+  }, 'VERIFY');
 
   await conductor.transition('INTEGRATE', 'PHASE');
   const merges: Array<{ id: string; ok: boolean; conflict: boolean }> = [];
@@ -140,9 +166,15 @@ export async function runTeamEngagement(conductor: Conductor, opts: TeamOptions)
   let testOutput = '';
   if (opts.testCommand && opts.runTestCommand) {
     const test = await opts.runTestCommand(opts.repoRoot, opts.testCommand);
+    await conductor.record('TEST_RECEIPT', {
+      taskId: 'integration',
+      cmd: opts.testCommand,
+      exit: test.ok ? 0 : 1,
+      outputRef: test.output.slice(0, 1000),
+    });
     testOutput = `\n\n${opts.testCommand}: ${test.ok ? 'PASS' : 'FAIL'}\n${test.output.slice(0, 1000)}`;
   }
-  await conductor.journal.append('INTEGRATE', 'MERGE_RESULTS', merges);
+  await conductor.record('MERGE_RESULTS', merges, 'INTEGRATE');
 
   await conductor.transition('REPORT', 'PHASE');
   const report =
@@ -151,7 +183,7 @@ export async function runTeamEngagement(conductor: Conductor, opts: TeamOptions)
     `\n\nMerges into ${opts.integrationBranch}:\n` +
     merges.map((m) => `[${m.ok ? 'merged' : m.conflict ? 'CONFLICT' : 'skipped'}] ${m.id}`).join('\n') +
     testOutput;
-  await conductor.journal.append('REPORT', 'REPORT', { text: report });
+  await conductor.record('REPORT', { text: report }, 'REPORT');
   conductor.state.report = report;
   await conductor.complete();
 }

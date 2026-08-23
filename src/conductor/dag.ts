@@ -119,11 +119,20 @@ export class TaskDag {
  * to `concurrency`. A node that throws is recorded as a failed result via
  * markFailed — independent branches of the graph keep progressing; only
  * nodes that depend on the failure stay blocked forever, surfaced by the
- * caller checking `dag.isComplete` after this resolves. */
+ * caller checking `dag.isComplete` after this resolves.
+ *
+ * `shouldStop` is checked before launching each new batch — same pattern as
+ * runToolLoop's per-turn check (providers/openai-compat.ts) — so a budget
+ * hard-stop (conductor.state.phase becoming 'PARKED') stops new implementer
+ * spend immediately rather than letting every already-ready node in the
+ * graph launch regardless. Already-running nodes are allowed to finish
+ * (matches runToolLoop: a turn already in flight isn't aborted mid-call);
+ * only *new* launches are gated. */
 export async function runDag(
   dag: TaskDag,
   runNode: (node: TaskNode) => Promise<TaskResult>,
   concurrency: number,
+  shouldStop?: () => boolean,
 ): Promise<TaskResult[]> {
   const results: TaskResult[] = [];
   const running = new Map<string, Promise<void>>();
@@ -146,18 +155,21 @@ export async function runDag(
   };
 
   while (!dag.isComplete) {
-    const ready = dag.ready();
-    for (const node of ready) {
-      if (running.size >= concurrency) break;
-      launch(node);
+    if (!shouldStop?.()) {
+      const ready = dag.ready();
+      for (const node of ready) {
+        if (running.size >= concurrency) break;
+        launch(node);
+      }
     }
-    if (running.size === 0 && !dag.isComplete) {
-      // Nothing ready, nothing running, but not complete — a failed node's
-      // dependents can never unblock. Nothing left to schedule; stop here
-      // rather than spin forever.
+    if (running.size === 0) {
+      // Nothing running and either nothing left ready, or shouldStop fired —
+      // a failed node's dependents can never unblock, and a stopped run
+      // isn't going to start anything new either way. Stop here rather than
+      // spin forever.
       break;
     }
-    if (running.size > 0) await Promise.race(running.values());
+    await Promise.race(running.values());
   }
   return results;
 }
