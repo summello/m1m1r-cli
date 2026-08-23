@@ -6,6 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, appendFile, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { Redactor } from '../security/redact.js';
+import { makeEvidence, type Evidence, type EvidenceSource } from '../truth/evidence.js';
+import { auditReport, survivalRate, type AuditResult } from '../truth/auditor.js';
 
 export type Phase =
   | 'INTAKE'
@@ -217,6 +219,12 @@ export type ConductorState = {
   // reusing those fields for a structurally different flow.
   teamNodes?: PlannedTeamNode[];
   teamResults?: TeamNodeResult[];
+  // ponytail: the journal is the evidence store. PLAN §3.4 sketches a separate
+  // `evidence/` directory, but a second on-disk copy of what the journal
+  // already holds buys nothing and can disagree with it. Replayed below, so
+  // evidence survives resume for free. Split it out if evidence ever needs
+  // indexing the journal can't serve.
+  evidence: Evidence[];
 };
 
 /** Phase state machine over an append-only journal. */
@@ -312,6 +320,29 @@ export class Conductor {
     await this.record('QUESTION_ANSWERED', { id, answer });
   }
 
+  /** Record one Evidence object. Confidence is re-derived from the source here
+   * rather than trusted from the caller — an agent that hands over
+   * `confidence: "verified"` with no citation is the case this exists for. */
+  async recordEvidence(id: string, claim: string, source?: EvidenceSource): Promise<Evidence> {
+    const evidence = makeEvidence(id, claim, source);
+    this.state.evidence.push(evidence);
+    await this.record('EVIDENCE', evidence);
+    return evidence;
+  }
+
+  /** Audit a report against everything recorded this engagement, journal the
+   * audited text, and return it. Nothing reaches the human un-audited. */
+  async auditAndRecordReport(report: string): Promise<AuditResult> {
+    const result = auditReport(report, this.state.evidence);
+    this.state.report = result.text;
+    await this.record('REPORT', {
+      text: result.text,
+      struck: result.struckCount,
+      survival: survivalRate(result),
+    });
+    return result;
+  }
+
   async raiseQuestion(question: OpenQuestion): Promise<void> {
     if (this.state.openQuestions.some((item) => item.id === question.id)) return;
     this.state.openQuestions.push(question);
@@ -389,6 +420,7 @@ function replay(j: Journal): ConductorState {
     openQuestions: [],
     paused: false,
     taskRedirects: {},
+    evidence: [],
   };
   for (const ev of j.eventsAll) {
     if (!s.id) s.id = ev.id.slice(0, 8); // stable display id from first event
@@ -417,6 +449,9 @@ function replay(j: Journal): ConductorState {
         break;
       case 'REPORT':
         s.report = (ev.payload as { text: string }).text;
+        break;
+      case 'EVIDENCE':
+        s.evidence.push(ev.payload as Evidence);
         break;
       case 'QUESTION_RAISED':
         s.openQuestions.push(ev.payload as OpenQuestion);
