@@ -1,11 +1,40 @@
 import React from 'react';
+import { basename } from 'node:path';
 import { Box, Text } from 'ink';
 import type { UiState } from './store.js';
-import { GalaxyLogo } from './galaxy-logo.js';
-import { GradientBox } from './gradient-box.js';
+import { galaxyFull, galaxyGlyph, GALAXY_WIDTH } from './logo.js';
+import { wordmark, wordmarkWidth, WORDMARK_ROWS } from './wordmark.js';
 import { ResumeStrip } from './resume-strip.js';
 import { useTerminalSize } from './dimensions.js';
-import { tokenColor } from './theme.js';
+import { dimmable, tokenColor } from './theme.js';
+
+const QUICK_COMMANDS = '/model  /plan  /questions  /agents  /pause  /redirect';
+
+// Below this the identity and guide columns stack, which makes the banner much
+// taller; above it they sit side by side and long lines simply truncate.
+const STACK_BELOW = 64;
+
+const IDENTITY_AND_GUIDE_ROWS = 9;
+const STACKED_BODY_ROWS = 14; // identity (4) + gap + guide (9)
+
+function markFitsAt(width: number): boolean {
+  return width >= GALAXY_WIDTH + wordmarkWidth() + 6;
+}
+
+/** Rows the banner occupies, so the cockpit can decide whether it fits before
+ * rendering it. Guarded by a test that renders at each breakpoint and counts. */
+export function bannerRows(width: number): number {
+  const mark = markFitsAt(width) ? WORDMARK_ROWS : 1;
+  const body = width < STACK_BELOW ? STACKED_BODY_ROWS : IDENTITY_AND_GUIDE_ROWS;
+  return mark + 1 + body;
+}
+
+const STARTERS: Array<[string, string]> = [
+  ['m1m1r "<requirement>"', 'start an engagement'],
+  ['/plan', 'plan without executing'],
+  ['/init', 'write M1M1R.md conventions'],
+  ['/help', 'all commands'],
+];
 
 export interface WelcomePanelProps {
   state: UiState;
@@ -25,41 +54,69 @@ export function WelcomePanel({
   resumedEngagementId,
 }: WelcomePanelProps): React.JSX.Element {
   const terminal = useTerminalSize(width);
-  const stacked = terminal.width < 90;
-  const contentWidth = Math.max(1, terminal.width - 4);
-  const columnWidth = stacked ? contentWidth : Math.floor((contentWidth - 3) / 2);
+  const markFits = markFitsAt(terminal.width);
+  const stacked = terminal.width < STACK_BELOW;
+  const commandWidth = Math.max(...STARTERS.map(([command]) => command.length)) + 3;
+  const columnWidth = stacked ? terminal.width : Math.floor(terminal.width / 2) - 2;
+
   const identity = (
     <Box flexDirection="column" width={columnWidth}>
-      <GalaxyLogo size={stacked ? 'compact' : 'full'} width={columnWidth} />
-      <Text bold>Welcome back, <Text color={tokenColor('nebula')}>{userName}</Text>.</Text>
-      <Text color={tokenColor('nebula')}>{state.model ?? 'model —'} · {state.effort} · {state.provider} ({state.account})</Text>
-      <Text color={tokenColor('violet')} wrap="truncate-end">{projectPath}</Text>
-      <Text>{state.branch ?? 'branch —'}{state.dirty ? '*' : ''}</Text>
+      <Text>Welcome back, <Text color={tokenColor('nebula')}>{userName}</Text>.</Text>
+      <Text dimColor={dimmable()} wrap="truncate-end">
+        {state.model ?? 'no model'} · {state.effort} · {state.provider} ({state.account})
+      </Text>
+      <Text color={tokenColor('violet')} wrap="truncate-start">{projectPath}</Text>
+      <Text dimColor={dimmable()} wrap="truncate-end">
+        {basename(projectPath)} · {state.branch ?? 'no branch'}{state.dirty ? '*' : ''} · wt:{state.worktree}
+      </Text>
     </Box>
   );
+
   const guide = (
     <Box flexDirection="column" width={columnWidth} marginTop={stacked ? 1 : 0}>
-      <Text color={tokenColor('orchid')} bold>Tips for getting started</Text>
-      <Text>Run /init to write M1M1R.md — conventions the whole team reads.</Text>
-      <Text dimColor>{'─'.repeat(Math.max(1, columnWidth))}</Text>
-      <Text color={tokenColor('orchid')} bold>What’s new</Text>
-      <Text>Live agent steering, receipts, and a budget-aware cockpit.</Text>
-      <Text dimColor>{'─'.repeat(Math.max(1, columnWidth))}</Text>
-      <Text color={tokenColor('orchid')} bold>Quick commands</Text>
-      <Text>/model  /plan  /questions  /agents  /pause  /redirect</Text>
+      <Text color={tokenColor('orchid')}>Get started</Text>
+      {STARTERS.map(([command, description]) => (
+        <Text key={command} wrap="truncate-end">
+          {'  '}{command.padEnd(commandWidth)}<Text dimColor={dimmable()}>{description}</Text>
+        </Text>
+      ))}
+      <Text color={tokenColor('orchid')}>What’s new</Text>
+      <Text dimColor={dimmable()} wrap="truncate-end">
+        Live agent steering, receipts, and a budget-aware cockpit.
+      </Text>
+      <Text color={tokenColor('orchid')}>Quick commands</Text>
+      <Text dimColor={dimmable()} wrap="truncate-end">{QUICK_COMMANDS}</Text>
     </Box>
   );
+
   return (
-    <GradientBox title={`m1m1r v${version}`} width={terminal.width}>
-      <Box flexDirection={stacked ? 'column' : 'row'} justifyContent="space-between">
+    <Box flexDirection="column" width={terminal.width}>
+      {markFits ? (
+        <Box flexDirection="row">
+          <Box flexDirection="column" width={GALAXY_WIDTH + 3}>
+            {galaxyFull().map((line, index) => <Text key={index}>{line}</Text>)}
+          </Box>
+          <Box flexDirection="column">
+            {wordmark().map((line, index) => <Text key={index}>{line}</Text>)}
+          </Box>
+          <Box marginLeft={2}>
+            <Text dimColor={dimmable()}>v{version}</Text>
+          </Box>
+        </Box>
+      ) : (
+        <Text>
+          <Text color={tokenColor('nebula')}>{galaxyGlyph()} m1m1r</Text>
+          <Text dimColor={dimmable()}>  v{version}</Text>
+        </Text>
+      )}
+      <Box marginTop={1} flexDirection={stacked ? 'column' : 'row'} justifyContent="space-between">
         {identity}{guide}
       </Box>
       {resumedEngagementId && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text dimColor>{'─'.repeat(contentWidth)}</Text>
-          <ResumeStrip state={state} engagementId={resumedEngagementId} width={contentWidth} />
+        <Box marginTop={1}>
+          <ResumeStrip state={state} engagementId={resumedEngagementId} width={terminal.width} />
         </Box>
       )}
-    </GradientBox>
+    </Box>
   );
 }

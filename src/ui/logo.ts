@@ -1,32 +1,30 @@
-// Spiral-galaxy logo (PLAN §3.7.2). Full art for wide layouts, glyph fallback.
+// Spiral-galaxy logo (PLAN §3.7.2). Filled art for the launch banner, glyph
+// fallback for tight layouts.
 import { gradient } from './theme.js';
 
+// Shading carries the depth the silhouette can't at this size: ░ rim, ▒▓ arms,
+// █ disc and core. Sized to sit beside the 5-row wordmark. Block-drawing only —
+// ● and ◉ are ambiguous-width and would break column alignment.
 export const GALAXY_FULL = [
-  '       *    .       \u{2727}        .    *',
-  '    .          _.-=-._',
-  '         \u{2727}  ,-’  \u{2726}  ’-,         .',
-  '    .      ,’  ,-’’’-,  ’,',
-  '          /  ,’  (\u{2727})  ’,  \\      *',
-  '    -    |  |  ,’     ’,  |  -',
-  '         |  |  ’,     ,’  |',
-  '    .     \\  ’,  ’-...-’  ,’        .',
-  '     \u{2727}     ’,  ’-.......’  \u{2727}',
-  '    .    *   ’-,_     _,-’   .    *',
-  '           .     ’’’’’’’      .',
-  '       *     .    \u{2726}    .      *',
+  '   ░▒▓▓▒░   ',
+  ' ░▓██▀▀██▓░ ',
+  ' ▒█▌ ██ ▐█▒ ',
+  ' ░▓██▄▄██▓░ ',
+  '   ░▒▓▓▒░   ',
 ];
 
-/** Gradient-filled galaxy: rim violet -> arms orchid -> core white-hot.
- * Row bands mapped top-to-bottom so the center rows glow brightest. */
+/** Gradient-filled galaxy: rim violet -> arms orchid -> core white-hot. */
 export function galaxyFull(): string[] {
-  const bands = GALAXY_FULL.length;
-  return GALAXY_FULL.map((line, i) => {
-    const t = i / Math.max(1, bands - 1);
-    if (i >= 4 && i <= 5) return gradient('core', 'nebula', line); // core rows glow
-    return t < 0.5 ? gradient('violet', 'orchid', line) : gradient('orchid', 'violet', line);
-  });
+  const middle = Math.floor(GALAXY_FULL.length / 2);
+  return GALAXY_FULL.map((line, index) =>
+    index === middle
+      ? gradient('core', 'nebula', line)
+      : gradient('violet', 'orchid', line),
+  );
 }
 
 export function galaxyGlyph(): string {
   return '\u{2727}';
 }
+
+export const GALAXY_WIDTH = Math.max(...GALAXY_FULL.map((line) => line.length));

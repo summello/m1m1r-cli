@@ -55,6 +55,12 @@ export function tokenColor(token: TokenName): string | undefined {
   return getSupport() === 'mono' ? undefined : TOKENS[token];
 }
 
+/** Ink's `dimColor` emits an SGR attribute even without a color, so mono mode
+ * has to opt out of it too or the frame is no longer escape-free. */
+export function dimmable(): boolean {
+  return getSupport() !== 'mono';
+}
+
 function hexToRgb(hex: string): [number, number, number] {
   const n = parseInt(hex.slice(1), 16);
   return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
